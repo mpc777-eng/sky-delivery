@@ -1,0 +1,955 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Sky Delivery</title>
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Sky Delivery">
+<meta name="theme-color" content="#4fb0ff">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="icon" href="icon-192.png">
+<link rel="manifest" href="manifest.webmanifest">
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#4fb0ff;touch-action:none;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
+  canvas{display:block;width:100vw;height:100vh}
+  #start{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;background:linear-gradient(#4fb0ff 0%,#bfe9ff 62%,#7ccc5a 62%,#5fb544 100%);font-family:"Chalkboard SE","Comic Sans MS","Comic Neue",system-ui,sans-serif;z-index:5}
+  #start h1{font-size:10vmin;margin:0 0 1vmin;color:#fff;text-align:center;text-shadow:0 .6vmin 0 #2a6aa8}
+  #start p{font-size:4.2vmin;margin:0;color:#fff;text-shadow:0 .4vmin 0 #2a6aa8;text-align:center}
+  #start .big{font-size:20vmin;line-height:1.1}
+  #play{margin-top:4vmin;font-size:8vmin;padding:2vmin 8vmin;border:none;border-radius:6vmin;background:#ffcc33;color:#5a3a00;box-shadow:0 1.2vmin 0 #c99400;font-family:inherit}
+  #shop{margin-top:3vmin;font-size:5vmin;padding:1.5vmin 6vmin;border:none;border-radius:5vmin;background:#7be06b;color:#1d4d12;box-shadow:0 1vmin 0 #4a9e3c;font-family:inherit}
+  #startCoins{margin-top:2vmin!important;font-size:4.5vmin!important}
+  #play:active{transform:translateY(1vmin);box-shadow:0 .2vmin 0 #c99400}
+</style>
+</head>
+<body>
+<div id="start">
+  <div class="big">✈️📦</div>
+  <h1>Sky Delivery</h1>
+  <p>Fly packages from airport to airport!</p>
+  <button id="play">▶ Play</button>
+  <button id="shop">🛒 Plane Shop</button>
+  <p id="startCoins"></p>
+</div>
+<canvas id="c"></canvas>
+<script>
+"use strict";
+// ================= Tuning =================
+const LEG = 7000;          // distance between airports
+const RUNWAY = 1100;       // runway length
+const TAKEOFF_V = 210;     // speed needed to take off
+const MAXALT = 1500;       // highest the plane can fly
+const STAR3 = -95, STAR2 = -165, CRASH_VY = -245;  // touchdown descent speeds
+// ==========================================
+const W = 1024, H = 768, BASE = 640;
+const FONT = '"Chalkboard SE","Comic Sans MS","Comic Neue",system-ui,sans-serif';
+const NAMES = ["Home Field", "Sunny Beach", "Snowy Peak", "Cactus Town", "Maple City", "Coral Bay", "Pine Ridge", "Sandy Rock"];
+const BIOMES = ["city", "ocean", "mountains", "desert"];
+const CARGO = [["📦", "packages"], ["🍕", "pizzas"], ["🧸", "teddy bears"], ["✉️", "letters"], ["🎁", "presents"], ["🍦", "ice cream"]];
+const cv = document.getElementById("c"), ctx = cv.getContext("2d");
+let scale = 1, offX = 0, offY = 0;
+function resize() {
+  const dpr = window.devicePixelRatio || 1;
+  cv.width = innerWidth * dpr; cv.height = innerHeight * dpr;
+  scale = Math.min(innerWidth / W, innerHeight / H);
+  offX = (innerWidth - W * scale) / 2; offY = (innerHeight - H * scale) / 2;
+  ctx.setTransform(dpr * scale, 0, 0, dpr * scale, dpr * offX, dpr * offY);
+}
+addEventListener("resize", resize); resize();
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const rnd = (a, b) => a + Math.random() * (b - a);
+const hash = i => { const x = Math.sin(i * 127.1 + 311.7) * 43758.5453; return x - Math.floor(x); };
+
+// ---------- sound and voice ----------
+let ac = null, noiseBuf = null, engOsc = null, engGain = null, windGain = null;
+function initAudio() {
+  try {
+    ac = new (window.AudioContext || window.webkitAudioContext)(); ac.resume();
+    noiseBuf = ac.createBuffer(1, ac.sampleRate * 2, ac.sampleRate);
+    const d = noiseBuf.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+    engOsc = ac.createOscillator(); engOsc.type = "sawtooth"; engOsc.frequency.value = 70;
+    const lp = ac.createBiquadFilter(); lp.type = "lowpass"; lp.frequency.value = 380;
+    engGain = ac.createGain(); engGain.gain.value = 0;
+    engOsc.connect(lp).connect(engGain).connect(ac.destination); engOsc.start();
+    const src = ac.createBufferSource(); src.buffer = noiseBuf; src.loop = true;
+    const bp = ac.createBiquadFilter(); bp.type = "bandpass"; bp.frequency.value = 700; bp.Q.value = 0.5;
+    windGain = ac.createGain(); windGain.gain.value = 0;
+    src.connect(bp).connect(windGain).connect(ac.destination); src.start();
+  } catch (e) { ac = null; }
+}
+function tone(freq, dur, type = "sine", vol = 0.25, slide = 0, delay = 0) {
+  if (!ac) return;
+  const t = ac.currentTime + delay, o = ac.createOscillator(), g = ac.createGain();
+  o.type = type; o.frequency.setValueAtTime(freq, t);
+  if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(30, freq + slide), t + dur);
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(g).connect(ac.destination); o.start(t); o.stop(t + dur + 0.02);
+}
+function noise(dur, vol, type, freq, delay = 0, freqEnd = 0) {
+  if (!ac || !noiseBuf) return;
+  const t = ac.currentTime + delay, s = ac.createBufferSource(); s.buffer = noiseBuf;
+  const f = ac.createBiquadFilter(); f.type = type; f.frequency.setValueAtTime(freq, t);
+  if (freqEnd) f.frequency.exponentialRampToValueAtTime(freqEnd, t + dur);
+  const g = ac.createGain(); g.gain.setValueAtTime(0.0001, t);
+  g.gain.exponentialRampToValueAtTime(vol, t + 0.03); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  s.connect(f).connect(g).connect(ac.destination); s.start(t); s.stop(t + dur + 0.05);
+}
+const sfx = {
+  ring: () => { [784, 988, 1319].forEach((f, i) => tone(f, 0.18, "triangle", 0.18, 0, i * 0.07)); },
+  coin: () => { tone(988, 0.07, "square", 0.08); tone(1319, 0.15, "square", 0.08, 0, 0.07); },
+  fuel: () => { for (let i = 0; i < 4; i++) tone(300 + i * 90, 0.1, "sine", 0.2, 0, i * 0.08); },
+  bonk: () => { tone(500, 0.18, "triangle", 0.25, -250); noise(0.15, 0.2, "bandpass", 900); },
+  gear: () => { tone(180, 0.8, "sawtooth", 0.05, 120); tone(600, 0.1, "square", 0.05, 0, 0.8); },
+  squeak: () => { noise(0.12, 0.25, "highpass", 2500); noise(0.12, 0.2, "highpass", 2500, 0.15); },
+  crash: () => { noise(1.4, 0.6, "lowpass", 900, 0, 90); tone(120, 0.6, "triangle", 0.3, -70); for (let j = 0; j < 6; j++) tone(rnd(400, 1200), 0.06, "square", 0.05, 0, 0.05 + j * 0.08); },
+  splash: () => { noise(1.0, 0.5, "bandpass", 1200, 0, 300); },
+  yay: () => { [523, 659, 784, 1047, 784, 1047].forEach((f, i) => tone(f, 0.26, "triangle", 0.2, 0, i * 0.12)); },
+  nope: () => { tone(300, 0.14, "square", 0.07); tone(230, 0.2, "square", 0.07, 0, 0.15); },
+  whoosh: () => noise(0.6, 0.2, "bandpass", 400, 0, 1400),
+  star: (i) => tone(660 + i * 220, 0.25, "triangle", 0.22, 0, i * 0.25),
+};
+let lastSay = "", message = "";
+function setMsg(t) { message = t; }
+function say(text) {
+  lastSay = text; message = text;
+  try {
+    speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(text.replace(/[^\w\s!?,.']/g, ""));
+    u.lang = "en-US"; u.rate = 0.95; u.pitch = 1.1;
+    const v = speechSynthesis.getVoices().find(v => /Samantha|Karen|Moira|Tessa|Google US English/.test(v.name));
+    if (v) u.voice = v;
+    speechSynthesis.speak(u);
+  } catch (e) {}
+}
+
+// ---------- world ----------
+const legOf = x => Math.floor(x / LEG);
+const biomeOfLeg = L => BIOMES[((L % 4) + 4) % 4];
+const biomeAt = x => biomeOfLeg(legOf(x));
+const airportName = k => NAMES[((k % NAMES.length) + NAMES.length) % NAMES.length];
+function groundH(x) {
+  const L = legOf(x), u = x - L * LEG, b = biomeOfLeg(L);
+  if (u < 1500 || u > LEG - 1800) return 0;
+  const e = Math.min(1, (u - 1500) / 600, (LEG - 1800 - u) / 600);
+  if (b === "mountains") return e * Math.max(0, 170 + 140 * Math.sin(u / 420) + 80 * Math.sin(u / 170 + 1));
+  if (b === "desert") return e * (30 + 22 * Math.sin(u / 260));
+  if (b === "city") return e * (8 + 8 * Math.sin(u / 300));
+  return 0;
+}
+function isWater(x) { const L = legOf(x), u = x - L * LEG; return biomeOfLeg(L) === "ocean" && u > 1700 && u < LEG - 2000; }
+function runwayAt(x) { const k = legOf(x), u = x - k * LEG; return u >= 0 && u <= RUNWAY ? k : null; }
+
+const legCache = new Map();
+function legData(L) {
+  if (legCache.has(L)) return legCache.get(L);
+  let seed = L * 9301 + 49297; const r = () => (seed = (seed * 9301 + 49297) % 233280) / 233280;
+  const base = L * LEG, d = { rings: [], coins: [], balloons: [], fuel: [], clouds: [], birds: [], boats: [], whales: [] };
+  const top = (x, w = 300) => { let m = 0; for (let k = -w; k <= w; k += 50) m = Math.max(m, groundH(x + k)); return m; };
+  for (let u = 2300; u < LEG - 2600; u += 850 + r() * 300) { const x = base + u; d.rings.push({ x, alt: top(x) + 170 + r() * 300, got: false }); }
+  for (let a = 0; a < 3; a++) {
+    const x0 = base + 2000 + a * 1500 + r() * 400, h0 = top(x0, 500) + 150 + r() * 250;
+    for (let i = 0; i < 5; i++) d.coins.push({ x: x0 + i * 60, alt: h0 + Math.sin(i / 4 * Math.PI) * 70, got: false });
+  }
+  for (let i = 0; i < 2; i++) { const x = base + 2700 + i * 2200 + r() * 500; d.balloons.push({ x, alt: top(x) + 300 + r() * 350, ph: r() * 6, c: i + L }); }
+  { const x = base + LEG / 2 + 300; d.fuel.push({ x, alt: top(x) + 200 + r() * 150, got: false }); }
+  for (let u = 900; u < LEG; u += 500 + r() * 300) d.clouds.push({ x: base + u, alt: 260 + r() * 800, s: 0.8 + r() * 0.7 });
+  for (let i = 0; i < 2; i++) { const x = base + 3200 + i * 1900 + r() * 400; d.birds.push({ x, alt: top(x) + 200 + r() * 300, n: 3 + Math.floor(r() * 3), ph: r() * 6, hit: -99 }); }
+  if (biomeOfLeg(L) === "ocean") {
+    for (let u = 2000; u < LEG - 2300; u += 600 + r() * 400) d.boats.push({ x: base + u, c: Math.floor(r() * 3) });
+    for (let i = 0; i < 3; i++) d.whales.push({ x: base + 2500 + i * 900 + r() * 300, ph: r() * 6 });
+  }
+  legCache.set(L, d);
+  return d;
+}
+
+// ---------- state ----------
+let state = "start", time = 0, totalStars = 0, crashCount = 0;
+// ---------- plane skins + saved progress ----------
+const SKINS = [
+  { id: "classic", name: "Classic Red", price: 0, body: "#ff4757", stripe: "#ffffff", wing: "#f4f4f4", tail: "#ff4757", nose: "#ffd23f" },
+  { id: "sky", name: "Sky Blue", price: 60, body: "#4fb0ff", stripe: "#ffffff", wing: "#e8f6ff", tail: "#2a7fd4", nose: "#ffffff" },
+  { id: "candy", name: "Candy", price: 100, body: "#ff9cd2", stripe: "#ffffff", wing: "#fff0f8", tail: "#ff5fa8", nose: "#7be0ff", fx: "candy" },
+  { id: "tiger", name: "Tiger", price: 150, body: "#ff9f1c", stripe: "#ffffff", wing: "#ffe1b0", tail: "#ff9f1c", nose: "#333333", fx: "tiger" },
+  { id: "police", name: "Police", price: 200, body: "#2f5fd0", stripe: "#ffffff", wing: "#ffffff", tail: "#1d3f99", nose: "#ffffff", fx: "police" },
+  { id: "fire", name: "Fire Rescue", price: 250, body: "#e63946", stripe: "#ffd23f", wing: "#ffd23f", tail: "#c1121f", nose: "#ffffff", fx: "fire" },
+  { id: "shark", name: "Shark", price: 300, body: "#7d8fa3", stripe: "#ffffff", wing: "#9fb0c2", tail: "#6a7b8f", nose: "#7d8fa3", fx: "shark" },
+  { id: "rainbow", name: "Rainbow", price: 400, body: "#ff5e5e", stripe: "#ffffff", wing: "#ffffff", tail: "#7b5cff", nose: "#ffd23f", fx: "rainbow" },
+  { id: "galaxy", name: "Galaxy", price: 550, body: "#2b1b5a", stripe: "#b98cff", wing: "#3d2a7a", tail: "#1b1040", nose: "#ff7bd5", fx: "galaxy" },
+  { id: "gold", name: "Golden", price: 750, body: "#f5c518", stripe: "#fff3b0", wing: "#ffe066", tail: "#d4a017", nose: "#ffffff", fx: "gold" },
+];
+// plane models: sizes, handling, and how many coins they earn per landing
+const MODELS = [
+  { id: "zipper", name: "Tiny Zipper", price: 80, sc: 0.85, L: 48, R: 14, win: 1, wing: 26, gear: [-6, 16], strut: 16, wr: 7, prop: true, eng: 0,
+    spd: 1.15, acc: 1.3, climb: 1.2, turn: 1.5, tv: 190, coin: 1, gentle: 1.1, brake: 1.2, about: "Small and zippy!" },
+  { id: "classic", name: "Classic", price: 0, sc: 1, L: 66, R: 19, win: 4, wing: 36, gear: [-12, 26], strut: 22, wr: 8, prop: true, eng: 0,
+    spd: 1, acc: 1, climb: 1, turn: 1, tv: 210, coin: 1, gentle: 1, brake: 1, about: "Easy to fly." },
+  { id: "airliner", name: "Long Airliner", price: 300, sc: 1, L: 112, R: 19, win: 12, wing: 46, gear: [-34, 56], strut: 22, wr: 8, prop: false, eng: 1,
+    spd: 0.95, acc: 0.85, climb: 0.85, turn: 0.75, tv: 225, coin: 1.5, gentle: 0.95, brake: 0.85, about: "Carries more cargo!" },
+  { id: "jumbo", name: "Big Jumbo Jet", price: 700, sc: 1.15, L: 120, R: 25, win: 14, deck: true, wing: 58, gear: [-46, -20, 60], strut: 24, wr: 10, prop: false, eng: 2,
+    spd: 0.9, acc: 0.7, climb: 0.72, turn: 0.6, tv: 240, coin: 2, gentle: 0.85, brake: 0.65, about: "Huge! Land extra gently." },
+];
+for (const m of MODELS) m.cy = (m.R * 0.5 + m.strut + m.wr) * m.sc;   // height of the body center above the wheels
+const LANDING_COINS = [0, 10, 20, 30];
+const SAVE_KEY = "skyDelivery.save.v1";
+let coins = 0, owned = ["classic"], equipped = "classic", ownedModels = ["classic"], model = "classic", saveDirty = false, saveT = 0;
+try {
+  const sv = JSON.parse(localStorage.getItem(SAVE_KEY) || "null");
+  if (sv) {
+    coins = Math.max(0, sv.coins | 0); totalStars = Math.max(0, sv.stars | 0);
+    if (Array.isArray(sv.owned)) owned = sv.owned.filter(id => SKINS.some(k => k.id === id));
+    if (!owned.includes("classic")) owned.unshift("classic");
+    equipped = owned.includes(sv.equipped) ? sv.equipped : "classic";
+    if (Array.isArray(sv.models)) ownedModels = sv.models.filter(id => MODELS.some(k => k.id === id));
+    if (!ownedModels.includes("classic")) ownedModels.unshift("classic");
+    model = ownedModels.includes(sv.model) ? sv.model : "classic";
+  }
+} catch (e) {}
+function save() { saveDirty = false; try { localStorage.setItem(SAVE_KEY, JSON.stringify({ coins, owned, equipped, models: ownedModels, model, stars: totalStars })); } catch (e) {} }
+const skin = () => SKINS.find(k => k.id === equipped) || SKINS[0];
+const mdl = () => MODELS.find(k => k.id === model) || MODELS[1];
+const plane = { x: 150, alt: 0, vx: 0, vy: 0, ground: true, gear: 1, gearT: 1, prop: 0, shake: 0, justLanded: false, stars: 0, saidFast: false };
+let fuel = 100, fuelWarned = false, fuelEmpty = false;
+let mission = { origin: 0, dest: 1, cargo: 0, n: 3 };
+let camX = plane.x - 300, camAlt = 0;
+let particles = [], pieces = [], floaters = [], starPop = null;
+let crashWater = false, crashT = 0, deliverT = 0, mist = 0, inCloud = false;
+const said = new Set();
+function sayOnce(key, text) { if (said.has(key)) return; said.add(key); say(text); }
+const keys = { up: false, down: false, go: false };
+const held = new Map();
+let tiltOn = false, tiltVal = 0, tiltZero = null;
+
+function missionText() { const c = CARGO[mission.cargo]; return `Fly the ${c[1]} to ${airportName(mission.dest)}!`; }
+function newMission(k) {
+  mission = { origin: k, dest: k + 1, cargo: (mission.cargo + 1) % CARGO.length, n: 3 + Math.floor(Math.random() * 3) };
+}
+function parkAt(k) {
+  Object.assign(plane, { x: k * LEG + 150, alt: 0, vx: 0, vy: 0, ground: true, gear: 1, gearT: 1, justLanded: false, shake: 0, saidFast: false });
+  fuel = 100; fuelWarned = false; fuelEmpty = false;
+  camX = plane.x - 300; camAlt = 0;
+}
+
+// ---------- particles ----------
+function addP(p) { if (particles.length < 260) particles.push(p); }
+function burst(x, alt, n = 18, colors = ["#ffd23f", "#ff6b9a", "#5ad1ff", "#7be06b", "#ffffff"]) {
+  for (let i = 0; i < n; i++) addP({ x, alt, vx: rnd(-260, 260), va: rnd(100, 520), g: -900, life: rnd(1.2, 1.8), c: colors[i % colors.length], r: rnd(5, 11) });
+}
+function floater(text, x, alt, color) { floaters.push({ text, x, alt, color, life: 1.4 }); }
+
+// ---------- actions ----------
+function toggleGear() {
+  if (state !== "play") return;
+  if (plane.ground) { sfx.nope(); say("The wheels stay down on the ground!"); return; }
+  plane.gearT = plane.gearT ? 0 : 1; sfx.gear();
+  if (plane.gearT === 0) { if (!said.has("wheelsUp")) sayOnce("wheelsUp", `Wheels up! Follow the map to ${airportName(mission.dest)}.`); else setMsg("Wheels up! 🛞⬆️"); }
+  else setMsg("Wheels down! 🛞⬇️");
+}
+function crash(why) {
+  if (state !== "play") return;
+  state = "crash"; crashT = 3.2; crashCount++;
+  const water = isWater(plane.x); crashWater = water;
+  water ? sfx.splash() : sfx.crash();
+  const cx = plane.x, ca = Math.max(plane.alt, groundH(plane.x)) + 30;
+  const sk = skin(), m = mdl(), z = m.sc;
+  const parts = [];
+  for (let i = 0; i < Math.ceil(m.L / 30); i++) parts.push([i % 2 ? sk.stripe : sk.body, 34 * z, m.R * 1.6 * z]);
+  parts.push([sk.wing, m.wing * 1.1 * z, 9 * z], [sk.wing, m.wing * 0.9 * z, 8 * z], [sk.tail, 20 * z, (m.R + 4) * z], [sk.nose, 12 * z, 12 * z]);
+  for (let i = 0; i < Math.min(4, Math.ceil(m.win / 3)); i++) parts.push(["#9fd8ff", 10 * z, 8 * z]);
+  if (m.prop) parts.push(["#555", 6, 28 * z]);
+  for (let i = 0; i < m.eng * 2; i++) parts.push(["#b8c0cc", 26 * z, 12 * z]);
+  if (plane.gear > 0.3) for (const g of m.gear) parts.push(["#222", m.wr * 1.1 * z, m.wr * 1.1 * z, true]);
+  pieces = parts.map(([c, w, h, round]) => ({ x: cx + rnd(-30, 30), alt: ca + rnd(-10, 20), vx: plane.vx * 0.5 + rnd(-220, 220), va: rnd(200, 520), rot: rnd(0, 6), vr: rnd(-8, 8), c, w, h, round }));
+  for (let i = 0; i < 16; i++) addP({ x: cx + rnd(-30, 30), alt: ca, vx: rnd(-120, 120), va: rnd(40, 160), g: water ? -500 : 60, life: rnd(1, 2), c: water ? "#cfeaff" : ["#ff7b00", "#ffb000", "#ff4500"][i % 3], r: rnd(10, 22), fire: !water });
+  plane.vx = 0; mist = 0;
+  say(why + " Let's try again!");
+}
+function landed(stars) {
+  plane.ground = true; plane.alt = 0; plane.vy = 0; plane.justLanded = true; plane.stars = stars;
+  sfx.squeak(); starPop = { n: stars, t: 0 };
+  for (let i = 0; i < stars; i++) sfx.star(i);
+  for (let i = 0; i < 8; i++) addP({ x: plane.x + rnd(-30, 20), alt: 5, vx: rnd(-80, 30), va: rnd(30, 90), g: 50, life: 0.8, c: "rgba(230,230,230,0.7)", r: rnd(8, 14) });
+  const got = Math.round(LANDING_COINS[stars] * mdl().coin); coins += got; save();
+  floater("+" + got + " 🪙", plane.x, 170, "#ffd23f");
+  const words = ["", "One star! Good job!", "Two stars! Nice landing!", "Great landing! Three stars!"];
+  say(words[stars] + ` You got ${got} coins!`);
+}
+function arrive(k) {
+  if (k !== mission.dest) return;
+  state = "deliver"; deliverT = 4.5;
+  totalStars += plane.stars; save();
+  sfx.yay(); burst(plane.x, 120, 40);
+  const c = CARGO[mission.cargo];
+  say(`You delivered the ${c[1]} to ${airportName(k)}! Filling up the fuel.`);
+}
+
+// ---------- input ----------
+const BTN = {
+  up: { x: 92, y: 520, r: 64 }, down: { x: 92, y: 672, r: 64 },
+  gear: { x: W - 98, y: 520, r: 58 }, go: { x: W - 98, y: 672, r: 74 },
+  speaker: { x: W - 54, y: 52, r: 34 }, tilt: { x: W - 140, y: 52, r: 34 },
+};
+function toWorld(e) { return { x: (e.clientX - offX) / scale, y: (e.clientY - offY) / scale }; }
+function hitBtn(p) { for (const id in BTN) { const b = BTN[id]; if (Math.hypot(p.x - b.x, p.y - b.y) < b.r + 12) return id; } return null; }
+const HOLD = ["up", "down", "go"];
+cv.addEventListener("pointerdown", e => {
+  e.preventDefault();
+  if (state === "start") return;
+  const id = hitBtn(toWorld(e));
+  if (HOLD.includes(id)) held.set(e.pointerId, id);
+  else if (id === "gear") toggleGear();
+  else if (id === "speaker") say(lastSay || message);
+});
+cv.addEventListener("pointermove", e => {
+  if (!held.has(e.pointerId)) return;
+  const id = hitBtn(toWorld(e)); if (HOLD.includes(id)) held.set(e.pointerId, id);
+});
+for (const ev of ["pointerup", "pointercancel", "pointerleave"]) cv.addEventListener(ev, e => held.delete(e.pointerId));
+// tilt uses "click" so iOS counts it as a real tap for the permission prompt
+cv.addEventListener("click", e => { if (state !== "start" && hitBtn(toWorld(e)) === "tilt") toggleTilt(); });
+addEventListener("blur", () => { held.clear(); keys.up = keys.down = keys.go = false; });
+const KEYMAP = { ArrowUp: "up", w: "up", W: "up", ArrowDown: "down", s: "down", S: "down", " ": "go", ArrowRight: "go" };
+addEventListener("keydown", e => {
+  if (KEYMAP[e.key]) { keys[KEYMAP[e.key]] = true; e.preventDefault(); }
+  if (!e.repeat && (e.key === "g" || e.key === "G")) toggleGear();
+});
+addEventListener("keyup", e => { if (KEYMAP[e.key]) keys[KEYMAP[e.key]] = false; });
+const holding = id => { for (const v of held.values()) if (v === id) return true; return false; };
+
+function onOrient(e) {
+  const ang = (screen.orientation && screen.orientation.angle) || window.orientation || 0;
+  let v = ang === 90 ? -e.gamma : (ang === -90 || ang === 270) ? e.gamma : e.beta;
+  if (v == null) return;
+  if (tiltZero === null) tiltZero = v;
+  tiltVal = clamp((v - tiltZero) / 18, -1, 1); if (Math.abs(tiltVal) < 0.15) tiltVal = 0;
+}
+function toggleTilt() {
+  if (tiltOn) { tiltOn = false; tiltVal = 0; removeEventListener("deviceorientation", onOrient); say("Tilt is off. Use the up and down buttons."); return; }
+  const on = () => { tiltOn = true; tiltZero = null; addEventListener("deviceorientation", onOrient); say("Tilt is on! Tip the iPad to fly up and down."); };
+  if (typeof DeviceOrientationEvent !== "undefined" && typeof DeviceOrientationEvent.requestPermission === "function") {
+    DeviceOrientationEvent.requestPermission().then(r => r === "granted" ? on() : say("Tilt needs permission. Use the buttons instead.")).catch(() => say("Tilt didn't work. Use the buttons instead."));
+  } else if (window.DeviceOrientationEvent) on();
+  else say("Tilt doesn't work here. Use the buttons.");
+}
+
+// ---------- update ----------
+function update(dt) {
+  time += dt;
+  plane.prop += dt * (8 + plane.vx / 12);
+  plane.shake = Math.max(0, plane.shake - dt * 2.5);
+  saveT -= dt; if (saveDirty && saveT <= 0) { saveT = 2; save(); }
+  if (state === "play") updatePlane(dt);
+  else if (state === "crash") {
+    crashT -= dt;
+    if (Math.random() < dt * 14) {
+      const p = pieces[Math.floor(Math.random() * pieces.length)];
+      if (p) addP({ x: p.x + rnd(-8, 8), alt: p.alt + 6, vx: rnd(-20, 20), va: rnd(40, 90), g: -30, life: 1.4, c: crashWater ? "rgba(220,240,255,0.7)" : Math.random() < 0.5 ? "rgba(90,90,100,0.55)" : "rgba(255,140,0,0.8)", r: rnd(8, 16), fire: true });
+    }
+    if (crashT <= 0) {
+      pieces = []; parkAt(mission.origin); state = "play";
+      say(`Here we go again! Hold GO to speed up, then press UP to take off.`);
+    }
+  } else if (state === "deliver") {
+    deliverT -= dt; fuel = Math.min(100, fuel + dt * 40);
+    if (Math.random() < dt * 6) burst(camX + rnd(150, 900), camAlt + rnd(200, 450), 6);
+    if (deliverT <= 0) {
+      newMission(mission.dest); fuel = 100; fuelWarned = false; fuelEmpty = false; plane.justLanded = false; state = "play";
+      say(missionText() + " Hold GO to speed up, then press UP!");
+    }
+  }
+  for (const p of pieces) {
+    p.va -= 900 * dt; p.x += p.vx * dt; p.alt += p.va * dt; p.rot += p.vr * dt;
+    const g = isWater(p.x) ? -6 : groundH(p.x);
+    if (p.alt < g + p.h / 2) { p.alt = g + p.h / 2; p.va = Math.abs(p.va) * 0.3; p.vx *= 0.6; p.vr *= 0.6; }
+  }
+  for (const p of particles) {
+    p.vx *= 1 - dt * (p.fire ? 1.5 : 0.3); p.va -= p.g * dt;
+    p.x += p.vx * dt; p.alt += p.va * dt; p.life -= dt; if (p.fire) p.r += dt * 10;
+  }
+  particles = particles.filter(p => p.life > 0);
+  for (const f of floaters) { f.alt += 50 * dt; f.life -= dt; }
+  floaters = floaters.filter(f => f.life > 0);
+  if (starPop) { starPop.t += dt; if (starPop.t > 2.6) starPop = null; }
+  mist = Math.max(0, mist - dt * 1.5);
+  // camera
+  camX += (plane.x - 300 - camX) * Math.min(1, dt * 5);
+  camAlt += (Math.max(0, plane.alt - 300) - camAlt) * Math.min(1, dt * 3);
+  if (ac && engGain) {
+    const now = ac.currentTime, on = state === "play" || state === "deliver";
+    const go = keys.go || holding("go");
+    engGain.gain.setTargetAtTime(on ? 0.018 + 0.03 * plane.vx / 480 + (go ? 0.012 : 0) : 0, now, 0.1);
+    engOsc.frequency.setTargetAtTime(70 + 90 * plane.vx / 480, now, 0.1);
+    windGain.gain.setTargetAtTime(on && !plane.ground ? 0.03 + 0.05 * plane.vx / 480 : 0, now, 0.2);
+  }
+}
+
+function updatePlane(dt) {
+  const go = (keys.go || holding("go")) && fuel > 0;
+  let ctrl = (keys.up || holding("up") ? 1 : 0) - (keys.down || holding("down") ? 1 : 0);
+  if (!ctrl && tiltOn) ctrl = tiltVal;
+  const g0 = plane.gear; plane.gear += clamp(plane.gearT - plane.gear, -dt, dt);
+  const destX = mission.dest * LEG, m = mdl(), TV = m.tv;
+  if (plane.ground) {
+    if (go && !plane.justLanded) plane.vx = Math.min(480 * m.spd, plane.vx + 260 * m.acc * dt);
+    else plane.vx = Math.max(0, plane.vx - 260 * (plane.justLanded ? m.brake : 1) * dt);
+    plane.x += plane.vx * dt;
+    const k = legOf(plane.x), end = k * LEG + RUNWAY;
+    if (!plane.justLanded && plane.vx >= TV && !plane.saidFast) { plane.saidFast = true; say("Fast enough! Press UP to take off!"); }
+    if (!plane.justLanded && ctrl > 0 && plane.vx < TV && plane.vx > 5) setMsg("Faster! Keep holding GO 🚀");
+    if (!plane.justLanded && plane.x > end - 30 && plane.vx >= TV * 0.9) ctrl = 1; // runway ends: hop up
+    if (plane.x > end) { plane.x = end; if (plane.vx > 0) { plane.vx = 0; sfx.bonk(); setMsg("End of the runway!"); } }
+    if (!plane.justLanded && ctrl > 0 && plane.vx >= TV * 0.9) {
+      plane.ground = false; plane.vy = 140; plane.alt = 1; sfx.whoosh();
+      say("We're flying! Press GEAR to tuck in the wheels.");
+    }
+    if (plane.justLanded && plane.vx < 12) { plane.vx = 0; arrive(runwayAt(plane.x)); }
+    return;
+  }
+  // flying
+  let tv = (go ? 480 : 300) * m.spd;
+  if (plane.gear > 0.5) tv = Math.min(tv, (go ? 320 : 220) * m.spd);
+  if (fuel <= 0) tv = 220 * m.spd;
+  plane.vx += clamp(tv - plane.vx, -150 * m.acc * dt, 150 * m.acc * dt);
+  let vyT = (ctrl > 0 ? 240 * ctrl : ctrl < 0 ? 300 * ctrl : 0) * m.climb;
+  if (fuel <= 0) vyT = Math.min(vyT, -70);
+  plane.vy += clamp(vyT - plane.vy, -650 * m.turn * dt, 650 * m.turn * dt);
+  plane.x += plane.vx * dt; plane.alt += plane.vy * dt;
+  if (plane.alt > MAXALT) { plane.alt = MAXALT; plane.vy = Math.min(plane.vy, 0); setMsg("That's as high as we go! ☁️"); }
+  // fuel
+  fuel = Math.max(0, fuel - (go ? 2.6 : 1.3) * dt);
+  if (fuel < 25 && !fuelWarned) { fuelWarned = true; say("Fuel is low! Fly to the airport, or grab a fuel can!"); }
+  if (fuel <= 0 && !fuelEmpty) { fuelEmpty = true; say("Out of fuel! Glide down gently and land on the runway."); }
+  // scenery voice lines
+  const L = legOf(plane.x), u = plane.x - L * LEG, b = biomeOfLeg(L);
+  if (u > 1300 && u < 3000) sayOnce("biome" + L, { city: "Look at the big city!", ocean: "Look, the ocean! Can you see the whales?", mountains: "Mountains ahead! Fly up high!", desert: "Welcome to the desert! The sun is setting." }[b]);
+  // approach help
+  const dist = destX - plane.x;
+  if (dist < 2700 && dist > 0) sayOnce("near" + mission.dest + "_" + mission.origin + crashCount, `${airportName(mission.dest)} is ahead! Fly down low and follow the dots.`);
+  if (dist < 1700 && dist > -RUNWAY && plane.gearT === 0) sayOnce("gear" + mission.dest + crashCount, "Gear down for landing! Press GEAR.");
+  const above = plane.alt - groundH(plane.x);
+  if (dist < 600 && dist > -RUNWAY && above < 220 && plane.vy < -200 * m.climb * m.gentle) sayOnce("gentle" + mission.dest + crashCount, "Gently! Let go of DOWN to land softly.");
+  if (plane.x > destX + RUNWAY + 300) {
+    mission.dest++; say(`You flew past! No problem. Land at the next airport, ${airportName(mission.dest)}!`);
+  }
+  // pickups
+  const d = legData(L), cy = plane.alt + m.cy, nose = plane.x + m.L * m.sc * 0.3, hw = m.L * m.sc * 0.7;
+  for (const r of d.rings) if (!r.got && Math.abs(nose - r.x) < 26 && Math.abs(cy - r.alt) < 46) { r.got = true; coins += 3; saveDirty = true; sfx.ring(); floater("+3 🪙", r.x, r.alt + 60, "#ffd23f"); burst(r.x, r.alt, 10); }
+  for (const c of d.coins) if (!c.got && Math.abs(plane.x - c.x) < hw && Math.abs(cy - c.alt) < 20 + m.R * m.sc) { c.got = true; coins += 1; saveDirty = true; sfx.coin(); }
+  for (const f of d.fuel) if (!f.got && Math.abs(plane.x - f.x) < hw + 20 && Math.abs(cy - f.alt) < 30 + m.R * m.sc) { f.got = true; fuel = Math.min(100, fuel + 40); fuelWarned = fuel < 25; fuelEmpty = false; sfx.fuel(); floater("+FUEL", f.x, f.alt + 60, "#7be06b"); say("Fuel! Yay!"); }
+  for (const bl of d.balloons) {
+    const by = bl.alt + Math.sin(time * 0.6 + bl.ph) * 40;
+    if (Math.abs(plane.x - bl.x) < hw + 40 && Math.abs(cy - by) < 70 + m.R * m.sc && plane.shake <= 0) {
+      plane.vy = cy > by ? 260 : -200; plane.shake = 1; sfx.bonk();
+      if (!said.has("balloon")) sayOnce("balloon", "Bonk! Fly around the balloons!"); else setMsg("Bonk! 🎈");
+    }
+  }
+  for (const fl of d.birds) {
+    if (time - fl.hit < 4) continue;
+    const bx = fl.x + Math.sin(time * 0.5 + fl.ph) * 80, by = fl.alt + Math.sin(time * 1.3 + fl.ph) * 20;
+    if (Math.abs(plane.x - bx) < hw + 30 && Math.abs(cy - by) < 30 + m.R * m.sc) {
+      fl.hit = time; plane.shake = 1; sfx.bonk();
+      if (!said.has("birds")) sayOnce("birds", "Oops! Watch out for the birds!"); else setMsg("Watch out for birds! 🐦");
+    }
+  }
+  // flying through clouds
+  let inside = false;
+  for (const c of d.clouds) if (Math.abs(plane.x - c.x) < 90 * c.s && Math.abs(cy - c.alt) < 40 * c.s) inside = true;
+  if (inside) { mist = Math.min(0.55, mist + dt * 3); if (!inCloud) sfx.whoosh(); }
+  inCloud = inside;
+  // touching the ground
+  const gh = groundH(plane.x);
+  const flare = runwayAt(plane.x) !== null && plane.gear >= 0.98 && plane.alt - gh < 10 && plane.vy <= 5;
+  if (plane.alt <= gh || flare) {
+    const rw = runwayAt(plane.x), k = m.climb * m.gentle;
+    if (isWater(plane.x)) crash("Splash! We landed in the water.");
+    else if (rw === null) crash("Oh no, crash! Land on a runway next time.");
+    else if (plane.gear < 0.98) crash("Oh no! The wheels were up! Press GEAR before landing.");
+    else if (plane.vy < CRASH_VY * k) crash("Crash! That was too steep. Fly down more gently.");
+    else {
+      let stars = plane.vy > STAR3 * k ? 3 : plane.vy > STAR2 * k ? 2 : 1;
+      if (plane.vx > 280 * m.spd && stars > 1) stars--;
+      if (rw !== mission.dest) { mission.dest = rw; }
+      landed(stars);
+    }
+  }
+}
+
+// ---------- drawing helpers ----------
+const sx = x => x - camX, sy = a => BASE - a + camAlt;
+function emoji(ch, x, y, size, rot = 0) {
+  ctx.save(); ctx.translate(x, y); if (rot) ctx.rotate(rot);
+  ctx.font = `${size}px "Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",sans-serif`;
+  ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillText(ch, 0, 0); ctx.restore();
+}
+function circle(x, y, r, c) { ctx.fillStyle = c; ctx.beginPath(); ctx.arc(x, y, Math.max(0.1, r), 0, Math.PI * 2); ctx.fill(); }
+function ellipse(x, y, rx, ry, c, rot = 0) { ctx.fillStyle = c; ctx.beginPath(); ctx.ellipse(x, y, Math.max(0.1, rx), Math.max(0.1, ry), rot, 0, Math.PI * 2); ctx.fill(); }
+function roundRect(x, y, w, h, r) { ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r); ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath(); }
+function panel(x, y, w, h, c = "rgba(255,255,255,0.9)", r = 20) { ctx.fillStyle = c; roundRect(x, y, w, h, r); ctx.fill(); }
+function poly(c, pts) { ctx.fillStyle = c; ctx.beginPath(); pts.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)); ctx.closePath(); ctx.fill(); }
+function text(str, x, y, size, color, align = "center", outline = null, maxW) {
+  ctx.font = `bold ${size}px ${FONT}`; ctx.textAlign = align; ctx.textBaseline = "middle";
+  if (outline) { ctx.lineWidth = size / 5; ctx.strokeStyle = outline; ctx.lineJoin = "round"; ctx.strokeText(str, x, y, maxW); }
+  ctx.fillStyle = color; ctx.fillText(str, x, y, maxW);
+}
+function hex(c) { return [parseInt(c.slice(1, 3), 16), parseInt(c.slice(3, 5), 16), parseInt(c.slice(5, 7), 16)]; }
+const mixCache = new Map();
+function mix(a, b, k) {
+  k = Math.round(k * 40) / 40; const key = a + b + k; let v = mixCache.get(key);
+  if (!v) { const A = hex(a), B = hex(b); v = `rgb(${A.map((q, i) => Math.round(q + (B[i] - q) * k)).join(",")})`; mixCache.set(key, v); }
+  return v;
+}
+
+// ---------- the plane (any model, any skin) ----------
+const STARPTS = [[-40, -6], [-22, 8], [-5, -10], [12, 4], [30, -8], [44, 6], [-60, 2], [0, 10], [58, -4], [-80, -6], [80, 5], [95, -8]];
+function bodyPath(m) { ctx.beginPath(); ctx.ellipse(0, 0, m.L, m.R, 0, 0, Math.PI * 2); }
+function drawPlane(x, y, rot, gear, sk, m, t, shake = 0) {
+  const L = m.L, R = m.R;
+  ctx.save(); ctx.translate(x, y - m.cy); ctx.rotate(rot); ctx.scale(m.sc, m.sc);
+  if (shake) ctx.translate(Math.sin(t * 70) * 3 * shake, Math.cos(t * 60) * 2 * shake);
+  // tail fin
+  poly(sk.tail, [[-L + 4, -R * 0.2], [-L - 10, -R - 22 - L * 0.08], [-L + 14, -R - 22 - L * 0.08], [-L + 30, -R * 0.4]]);
+  if (sk.fx === "shark") poly(sk.body, [[-8, -R + 2], [6, -R - 22], [20, -R + 2]]);
+  ellipse(-L + 12, 2, 20 + L * 0.06, 5, sk.tail);
+  // landing gear (swings up into the belly)
+  for (const gx of m.gear) {
+    ctx.save(); ctx.translate(gx, R * 0.5); ctx.rotate((1 - gear) * 1.4);
+    ctx.fillStyle = "#8b93a0"; ctx.fillRect(-3, 0, 6, m.strut);
+    if (gear > 0.05) { circle(0, m.strut, m.wr, "#222"); circle(0, m.strut, m.wr * 0.45, "#c3c8d0"); }
+    ctx.restore();
+  }
+  // far wing + engines behind the body
+  if (m.eng >= 2) { ellipse(L * 0.05, R * 0.25, 22, 8, "#9aa3ae"); }
+  // body with skin pattern
+  bodyPath(m); ctx.fillStyle = sk.body; ctx.fill();
+  ctx.save(); bodyPath(m); ctx.clip();
+  if (sk.fx === "rainbow") { const cs = ["#ff5e5e", "#ff9f1c", "#ffd23f", "#5ad16b", "#4fb0ff", "#7b5cff"]; cs.forEach((c, i) => { ctx.fillStyle = c; ctx.fillRect(-L, -R + i * (2 * R / 6), 2 * L, 2 * R / 6 + 1); }); }
+  else if (sk.fx === "tiger" || sk.fx === "candy") {
+    ctx.fillStyle = sk.fx === "tiger" ? "#222" : "#ffffff";
+    for (let sx0 = -L; sx0 < L; sx0 += sk.fx === "tiger" ? 22 : 18) poly(ctx.fillStyle, [[sx0, -R], [sx0 + 8, -R], [sx0 - 4, R], [sx0 - 12, R]]);
+  } else if (sk.fx === "galaxy") {
+    ellipse(-L * 0.3, 0, L * 0.5, R, "#4b2a8a");
+    for (let i = 0; i < STARPTS.length; i++) { const [px, py] = STARPTS[i]; if (Math.abs(px) < L - 6) circle(px, py * R / 19, 1.5 + (Math.sin(t * 3 + i) > 0.5 ? 1 : 0), "#ffffff"); }
+  } else if (sk.fx === "gold") {
+    const g = ctx.createLinearGradient(0, -R, 0, R); g.addColorStop(0, "#fff3b0"); g.addColorStop(0.45, "#f5c518"); g.addColorStop(1, "#c99400");
+    ctx.fillStyle = g; ctx.fillRect(-L, -R, 2 * L, 2 * R);
+  } else if (sk.fx === "shark") { ellipse(0, R * 0.8, L, R * 0.7, "#ffffff"); }
+  if (sk.fx !== "rainbow" && sk.fx !== "tiger" && sk.fx !== "candy") { ctx.fillStyle = sk.stripe; ctx.fillRect(-L, R * 0.15, 2 * L, R * 0.28); }
+  if (sk.fx === "police" || sk.fx === "fire") { ctx.font = `bold ${Math.round(R * 0.55)}px ${FONT}`; ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillStyle = sk.fx === "police" ? "#1d3f99" : "#c1121f"; ctx.fillText(sk.fx === "police" ? "POLICE" : "RESCUE", -L * 0.25, R * 0.3); }
+  if (m.deck) { ctx.fillStyle = "rgba(255,255,255,0.18)"; ctx.fillRect(-L, -R, 2 * L, R * 0.3); }
+  ctx.restore();
+  // jumbo hump (double deck)
+  if (m.deck) { ctx.fillStyle = sk.body; ctx.beginPath(); ctx.ellipse(L * 0.45, -R * 0.55, L * 0.42, R * 0.75, 0, Math.PI, 0); ctx.fill(); }
+  // windows (no faces, just windows)
+  const wy = -R * 0.28, n = m.win;
+  if (n === 1) ellipse(L * 0.25, -R * 0.55, 14, 9, "#bfe8ff");
+  else for (let i = 0; i < n; i++) circle(-L * 0.6 + i * (L * 1.2 / (n - 1)) - (m.deck ? L * 0.1 : 0), wy, R * 0.18, "#bfe8ff");
+  if (m.deck) for (let i = 0; i < 5; i++) circle(L * 0.15 + i * 14, -R * 0.85, R * 0.14, "#bfe8ff");
+  // cockpit + nose
+  poly("#9fd8ff", [[L * 0.62, -R * 0.62], [L * 0.86, -R * 0.38], [L * 0.62, -R * 0.3]]);
+  if (sk.fx === "shark") {
+    ctx.fillStyle = "#c0303a"; ctx.fillRect(L * 0.55, R * 0.25, L * 0.4, 3);
+    ctx.fillStyle = "#fff"; for (let i = 0; i < 5; i++) poly("#fff", [[L * 0.55 + i * 6, R * 0.25], [L * 0.55 + i * 6 + 3, R * 0.25 + 6], [L * 0.55 + i * 6 + 6, R * 0.25]]);
+    circle(L * 0.72, -R * 0.1, 3, "#111");
+  }
+  if (m.prop) {
+    circle(L - 2, 0, R * 0.55, sk.nose);
+    ellipse(L + 6, 0, 3, R * 1.5, "rgba(210,210,210,0.35)");
+    ellipse(L + 6, 0, 3, R * 1.4 * Math.abs(Math.sin(plane.prop)), "rgba(60,60,60,0.75)");
+  } else circle(L - 5, R * 0.05, R * 0.32, sk.nose);
+  // near wing + engines
+  ellipse(L * 0.02, R * 0.35, m.wing, 9, sk.wing); ctx.strokeStyle = "rgba(0,0,0,0.15)"; ctx.lineWidth = 2; ctx.stroke();
+  for (let e = 0; e < m.eng; e++) { const ex = L * 0.08 + (e ? -m.wing * 0.55 : m.wing * 0.1); roundRect(ex - 16, R * 0.45 + 4, 32, 13, 6); ctx.fillStyle = "#c8cfd8"; ctx.fill(); circle(ex + 16, R * 0.45 + 10.5, 5, "#555"); }
+  // roof lights
+  if (sk.fx === "police" || sk.fx === "fire") {
+    const on = Math.sin(t * 12) > 0;
+    roundRect(-6, -R - 7, 18, 8, 3); ctx.fillStyle = sk.fx === "police" ? (on ? "#ff3030" : "#3060ff") : (on ? "#ff3030" : "#ffb000"); ctx.fill();
+  }
+  if (sk.fx === "gold" && Math.sin(t * 4) > 0.3) emoji("✨", L * 0.3, -R - 6, 16);
+  ctx.restore();
+}
+
+// ---------- scenery ----------
+const SKY = { city: ["#4fb0ff", "#cdeeff"], ocean: ["#3fa9ff", "#d8f4ff"], mountains: ["#6aa9e8", "#e8f2ff"], desert: ["#7a5cc2", "#ffb36b"] };
+const FAR = { city: "#a9d98f", ocean: "#62b9ef", mountains: "#9db8a0", desert: "#efc58a" };
+const MID = { city: "#8fd16f", ocean: "#4aa6e6", mountains: "#7fb27a", desert: "#e9b46e" };
+const LAND = { city: "#7ccc5a", ocean: "#e9d79a", mountains: "#6aa35a", desert: "#f0c27a" };
+function drawSky() {
+  const x = camX + W / 2, L = legOf(x), u = x - L * LEG, A = biomeOfLeg(L), B = biomeOfLeg(L + 1);
+  const t = clamp((u - (LEG - 2200)) / 2200, 0, 1);
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, mix(SKY[A][0], SKY[B][0], t)); g.addColorStop(1, mix(SKY[A][1], SKY[B][1], t));
+  ctx.fillStyle = g; ctx.fillRect(-600, -600, W + 1200, H + 1200);
+  const dw = (A === "desert" ? 1 - t : 0) + (B === "desert" ? t : 0);
+  const sunY = 130 + dw * 280 + camAlt * 0.05, r = 48 + dw * 30;
+  circle(840, sunY, r * 1.4, dw > 0.5 ? "rgba(255,140,80,0.3)" : "rgba(255,228,107,0.3)"); circle(840, sunY, r, mix("#ffe46b", "#ff7a3c", dw));
+}
+function layerBiome(X, p) { return biomeAt((X - W / 2) / p + W / 2); }
+function drawFar() {
+  const p = 0.2, sp = 240, base = BASE - 40 + camAlt * p;
+  const i0 = Math.floor((camX * p - 300) / sp), i1 = Math.floor((camX * p + W + 300) / sp);
+  for (let i = i0; i <= i1; i++) {
+    const X = i * sp, x = X - camX * p, b = layerBiome(X, p), h = hash(i);
+    ctx.fillStyle = FAR[b]; ctx.fillRect(x - 1, base, sp + 2, H + 600);
+    if (b === "city") { for (let j = 0; j < 3; j++) { const hh = 80 + hash(i * 3 + j) * 180, ww = 60 + hash(i + j * 7) * 30; ctx.fillStyle = "#a7c4e2"; ctx.fillRect(x + j * 80, base - hh, ww, hh + 2); } }
+    else if (b === "mountains") { poly("#8aa0b8", [[x - 60, base + 2], [x + 110, base - 240 - h * 120], [x + 300, base + 2]]); poly("#ffffff", [[x + 110 - 45, base - 170 - h * 90], [x + 110, base - 240 - h * 120], [x + 110 + 50, base - 165 - h * 90], [x + 110, base - 185 - h * 90]]); }
+    else if (b === "desert") { ellipse(x + 120, base + 4, 160, 40 + h * 30, "#e8b878"); if (i % 4 === 0) poly("#d9a45a", [[x + 40, base + 2], [x + 120, base - 110], [x + 200, base + 2]]); }
+    else if (i % 3 === 0) { ellipse(x + 120, base + 2, 70, 16, "#7fbf6a"); emoji("🌴", x + 120, base - 26, 40); }
+  }
+}
+const TOWER_C = ["#ff8fa3", "#ffd166", "#7ad7f0", "#b392f0", "#80e0a7"];
+function drawMid() {
+  const p = 0.5, sp = 200, base = BASE - 12 + camAlt * p;
+  const i0 = Math.floor((camX * p - 300) / sp), i1 = Math.floor((camX * p + W + 300) / sp);
+  for (let i = i0; i <= i1; i++) {
+    const X = i * sp, x = X - camX * p, b = layerBiome(X, p), h = hash(i + 50);
+    ctx.fillStyle = MID[b]; ctx.fillRect(x - 1, base, sp + 2, H + 600);
+    if (b === "city") {
+      for (let j = 0; j < 2; j++) {
+        const hh = 140 + hash(i * 2 + j) * 190, ww = 78 + hash(i + j) * 30, bx = x + j * 100, c = TOWER_C[(i + j * 2) % 5];
+        ctx.fillStyle = c; ctx.fillRect(bx, base - hh, ww, hh + 2);
+        ctx.fillStyle = "rgba(255,255,255,0.55)";
+        for (let wy = base - hh + 14; wy < base - 16; wy += 24) for (let wx = bx + 10; wx < bx + ww - 14; wx += 22) ctx.fillRect(wx, wy, 12, 12);
+        if (j === 0 && i % 3 === 0) { ctx.fillStyle = "#888"; ctx.fillRect(bx + ww / 2 - 2, base - hh - 30, 4, 30); circle(bx + ww / 2, base - hh - 32, 4, Math.sin(time * 4) > 0 ? "#ff3030" : "#7a1a1a"); }
+      }
+    } else if (b === "mountains") {
+      ellipse(x + 100, base + 10, 140, 60 + h * 30, "#6f9f68");
+      for (let j = 0; j < 3; j++) { const tx = x + 50 + j * 50, ty = base - 40 - (j % 2) * 20; poly("#2f7a45", [[tx - 18, ty + 30], [tx, ty - 30], [tx + 18, ty + 30]]); }
+    } else if (b === "desert") { if (i % 2 === 0) { poly("#d9774a", [[x + 30, base + 2], [x + 55, base - 90 - h * 40], [x + 165, base - 90 - h * 40], [x + 190, base + 2]]); ctx.fillStyle = "#c8653c"; ctx.fillRect(x + 55, base - 90 - h * 40, 110, 10); } }
+    else if (i % 5 === 0) { ellipse(x + 100, base + 4, 50, 14, "#8a8f99"); ctx.fillStyle = "#ffffff"; ctx.fillRect(x + 90, base - 80, 20, 80); ctx.fillStyle = "#e63946"; ctx.fillRect(x + 90, base - 60, 20, 14); ctx.fillRect(x + 90, base - 30, 20, 14); poly("#e63946", [[x + 86, base - 80], [x + 100, base - 96], [x + 114, base - 80]]); circle(x + 100, base - 86, 5, "#ffe46b"); }
+  }
+}
+function drawGround() {
+  const step = 16, cols = [];
+  for (let x = -step; x <= W + step; x += step) { const wx = camX + x; cols.push([x, wx, groundH(wx), isWater(wx) ? "water" : biomeAt(wx)]); }
+  let i = 0;
+  while (i < cols.length) {
+    const kind = cols[i][3]; let j = i; while (j + 1 < cols.length && cols[j + 1][3] === kind) j++;
+    const a = cols[i], b = cols[Math.min(j + 1, cols.length - 1)];
+    if (kind === "water") {
+      const top = sy(0) + 6, g = ctx.createLinearGradient(0, top, 0, top + 200); g.addColorStop(0, "#3aa0e8"); g.addColorStop(1, "#1d6fb8");
+      ctx.fillStyle = g; ctx.fillRect(a[0], top, b[0] - a[0] + 1, H + 600 - top);
+      ctx.strokeStyle = "rgba(255,255,255,0.7)"; ctx.lineWidth = 3; ctx.beginPath();
+      for (let x = a[0]; x < b[0]; x += 40) { const wx = x + ((-camX % 40) + 40) % 40; ctx.moveTo(wx, top + 4); ctx.quadraticCurveTo(wx + 10, top - 2 + Math.sin(time * 3 + x) * 2, wx + 20, top + 4); }
+      ctx.stroke();
+    } else {
+      ctx.fillStyle = LAND[kind]; ctx.beginPath(); ctx.moveTo(a[0], H + 600);
+      for (let k = i; k <= Math.min(j + 1, cols.length - 1); k++) ctx.lineTo(cols[k][0], sy(cols[k][2]));
+      ctx.lineTo(b[0], H + 600); ctx.closePath(); ctx.fill();
+      ctx.strokeStyle = "rgba(0,0,0,0.12)"; ctx.lineWidth = 4; ctx.beginPath();
+      for (let k = i; k <= Math.min(j + 1, cols.length - 1); k++) k === i ? ctx.moveTo(cols[k][0], sy(cols[k][2])) : ctx.lineTo(cols[k][0], sy(cols[k][2]));
+      ctx.stroke();
+      if (kind === "mountains") {
+        ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 12; ctx.lineCap = "round"; ctx.beginPath(); let on = false;
+        for (let k = i; k <= Math.min(j + 1, cols.length - 1); k++) { const c = cols[k]; if (c[2] > 290) { on ? ctx.lineTo(c[0], sy(c[2]) + 5) : ctx.moveTo(c[0], sy(c[2]) + 5); on = true; } else on = false; }
+        ctx.stroke();
+      }
+    }
+    i = j + 1;
+  }
+}
+function drawTreeish(b, x, alt, h) {
+  const X = sx(x), Y = sy(alt);
+  if (b === "city") {
+    if (h < 0.5) { const c = ["#ffe08a", "#a8d8ff", "#ffb3c7"][Math.floor(h * 6) % 3]; ctx.fillStyle = c; ctx.fillRect(X - 26, Y - 40, 52, 40); poly("#c8553d", [[X - 32, Y - 38], [X, Y - 64], [X + 32, Y - 38]]); ctx.fillStyle = "#8a5a2b"; ctx.fillRect(X - 6, Y - 22, 12, 22); }
+    else { ctx.fillStyle = "#8a5a2b"; ctx.fillRect(X - 4, Y - 30, 8, 30); circle(X, Y - 46, 24, "#3fae4a"); circle(X - 8, Y - 54, 12, "#5cc85c"); }
+  } else if (b === "mountains") { ctx.fillStyle = "#6b4a2b"; ctx.fillRect(X - 4, Y - 14, 8, 14); poly("#2f7a45", [[X - 26, Y - 12], [X, Y - 80], [X + 26, Y - 12]]); poly("#3c9455", [[X - 18, Y - 40], [X, Y - 86], [X + 18, Y - 40]]); }
+  else if (b === "desert") { ctx.fillStyle = "#3f9d5a"; roundRect(X - 8, Y - 70, 16, 70, 8); ctx.fill(); roundRect(X - 26, Y - 50, 12, 30, 6); ctx.fill(); roundRect(X + 14, Y - 58, 12, 26, 6); ctx.fill(); ctx.fillRect(X - 20, Y - 26, 14, 8); ctx.fillRect(X + 6, Y - 36, 12, 8); }
+  else emoji("🌴", X, Y - 40, 70);
+}
+function drawDecor() {
+  const sp = 260, i0 = Math.floor((camX - 200) / sp), i1 = Math.floor((camX + W + 200) / sp);
+  for (let i = i0; i <= i1; i++) {
+    const x = i * sp + hash(i) * 120, k = Math.round(x / LEG), u = x - k * LEG;
+    if (u > -700 && u < RUNWAY + 600) continue;
+    if (isWater(x)) continue;
+    drawTreeish(biomeAt(x), x, groundH(x), hash(i + 9));
+  }
+}
+function drawAirport(k) {
+  const ax = k * LEG; if (sx(ax) > W + 700 || sx(ax + RUNWAY) < -700) return;
+  const Y = sy(0), dest = k === mission.dest;
+  // hangar
+  { const X = sx(ax - 430); ctx.fillStyle = "#7d95b0"; ctx.beginPath(); ctx.moveTo(X - 110, Y); ctx.lineTo(X - 110, Y - 70); ctx.quadraticCurveTo(X, Y - 150, X + 110, Y - 70); ctx.lineTo(X + 110, Y); ctx.fill(); ctx.fillStyle = "#56708e"; ctx.fillRect(X - 70, Y - 70, 140, 70); text(String(k + 1), X, Y - 95, 26, "#fff"); }
+  // control tower
+  { const X = sx(ax - 150); ctx.fillStyle = "#f2f2f2"; ctx.fillRect(X - 14, Y - 150, 28, 150); poly("#e9e9e9", [[X - 32, Y - 150], [X + 32, Y - 150], [X + 24, Y - 186], [X - 24, Y - 186]]); ctx.fillStyle = "#7fd0ff"; ctx.fillRect(X - 26, Y - 182, 52, 26); ctx.fillStyle = "#e63946"; ctx.fillRect(X - 30, Y - 192, 60, 10); circle(X, Y - 202, 6, Math.sin(time * 5) > 0 ? "#ff3030" : "#7a1a1a"); }
+  // terminal with airport name
+  { const X = sx(ax + RUNWAY + 220); ctx.fillStyle = "#ffffff"; ctx.fillRect(X - 150, Y - 80, 300, 80); ctx.fillStyle = "#7fd0ff"; ctx.fillRect(X - 140, Y - 66, 280, 34); ctx.fillStyle = "#4fb0ff"; ctx.fillRect(X - 156, Y - 90, 312, 14);
+    panel(X - 120, Y - 132, 240, 40, dest ? "#ffd23f" : "#ffffff", 12); text(airportName(k), X, Y - 112, 24, "#1d3f6e", "center", null, 228); }
+  // windsock
+  { const X = sx(ax + RUNWAY + 40); ctx.fillStyle = "#999"; ctx.fillRect(X - 2, Y - 80, 4, 80); const w = Math.sin(time * 3) * 4;
+    poly("#ff7a1a", [[X, Y - 80], [X + 44, Y - 74 + w], [X + 44, Y - 66 + w], [X, Y - 60]]); ctx.fillStyle = "#fff"; ctx.fillRect(X + 14, Y - 77, 8, 15); }
+  // runway
+  const x0 = sx(ax), x1 = sx(ax + RUNWAY);
+  ctx.fillStyle = "#4b505a"; ctx.fillRect(x0, Y - 2, x1 - x0, 24);
+  ctx.fillStyle = "#ffffff";
+  for (let x = ax + 160; x < ax + RUNWAY - 120; x += 90) ctx.fillRect(sx(x), Y + 8, 46, 4);
+  for (const e of [ax + 20, ax + RUNWAY - 80]) for (let j = 0; j < 4; j++) ctx.fillRect(sx(e) + j * 15, Y + 1, 9, 18);
+  for (let x = ax; x <= ax + RUNWAY; x += 110) circle(sx(x), Y - 3, 4, (Math.floor(time * 3) + x / 110) % 2 < 1 ? "#ffd23f" : "#ff8a3c");
+  // landing helpers for the destination
+  if (dest && !plane.ground && state === "play") {
+    for (let x = ax - 1700; x <= ax + 100; x += 130) {
+      const alt = 330 * (ax + 120 - x) / 1820, X = sx(x), Yd = sy(alt) - mdl().cy;
+      circle(X, Yd, 8, "rgba(255,255,255,0.85)"); circle(X, Yd, 4, "#ffcc00");
+    }
+    const bx = sx(ax + 260), by = Y - 150 + Math.sin(time * 6) * 10;
+    panel(bx - 80, by - 74, 160, 40, "#ffcc00", 14); text("LAND HERE", bx, by - 54, 22, "#5a3a00");
+    poly("#ffcc00", [[bx - 22, by - 30], [bx + 22, by - 30], [bx, by]]);
+  }
+}
+function drawWater2(d) {
+  const top = sy(0) + 6;
+  for (const b of d.boats) {
+    const X = sx(b.x), bob = Math.sin(time * 2 + b.x) * 3; if (X < -100 || X > W + 100) continue;
+    poly(["#e63946", "#ffffff", "#ffd23f"][b.c], [[X - 40, top - 8 + bob], [X + 40, top - 8 + bob], [X + 28, top + 8 + bob], [X - 28, top + 8 + bob]]);
+    ctx.fillStyle = "#6b4a2b"; ctx.fillRect(X - 2, top - 70 + bob, 4, 62);
+    poly("#ffffff", [[X + 2, top - 68 + bob], [X + 36, top - 14 + bob], [X + 2, top - 14 + bob]]); poly("#ff9cd2", [[X - 2, top - 58 + bob], [X - 26, top - 14 + bob], [X - 2, top - 14 + bob]]);
+  }
+  for (const wh of d.whales) {
+    const X = sx(wh.x), up = Math.sin(time * 0.8 + wh.ph); if (X < -150 || X > W + 150) continue;
+    ctx.save(); ctx.beginPath(); ctx.rect(X - 120, top - 120, 240, 122); ctx.clip();
+    const y = top + 18 - up * 26;
+    ellipse(X, y, 80, 34, "#3d6fa8"); ellipse(X + 10, y + 14, 60, 18, "#9cc3e6");
+    poly("#3d6fa8", [[X - 70, y - 6], [X - 110, y - 34], [X - 96, y - 4], [X - 110, y + 18]]);
+    circle(X + 50, y - 8, 4, "#111");
+    ctx.restore();
+    if (up > 0.5) for (let j = 0; j < 5; j++) circle(X + 30 + (j - 2) * 8 * up, top - 20 - up * 40 - Math.abs(j - 2) * -6, 5, "rgba(255,255,255,0.85)");
+  }
+}
+function drawItems(d) {
+  for (const c of d.clouds) { const X = sx(c.x), Y = sy(c.alt); if (X < -200 || X > W + 200) continue; c._x = X; c._y = Y; }
+  for (const r of d.rings) {
+    if (r.got) continue; const X = sx(r.x), Y = sy(r.alt); if (X < -80 || X > W + 80) continue;
+    ctx.lineWidth = 10; ctx.strokeStyle = "#ff9f1c"; ctx.beginPath(); ctx.ellipse(X, Y, 16, 52, 0, 0, Math.PI * 2); ctx.stroke();
+    ctx.lineWidth = 4; ctx.strokeStyle = "#ffe46b"; ctx.beginPath(); ctx.ellipse(X, Y, 16, 52, 0, 0, Math.PI * 2); ctx.stroke();
+  }
+  for (const c of d.coins) {
+    if (c.got) continue; const X = sx(c.x), Y = sy(c.alt); if (X < -40 || X > W + 40) continue;
+    const s = Math.abs(Math.cos(time * 4 + c.x)); ellipse(X, Y, 15 * s + 2, 15, "#e0a800"); ellipse(X, Y, 11 * s + 1, 11, "#ffd23f");
+  }
+  for (const f of d.fuel) { if (f.got) continue; const X = sx(f.x), Y = sy(f.alt) + Math.sin(time * 3) * 6; if (X < -60 || X > W + 60) continue; circle(X, Y, 30, "rgba(123,224,107,0.45)"); emoji("⛽", X, Y, 40); }
+  for (const bl of d.balloons) {
+    const X = sx(bl.x), Y = sy(bl.alt + Math.sin(time * 0.6 + bl.ph) * 40); if (X < -120 || X > W + 120) continue;
+    const cs = [["#ff5e5e", "#ffd23f"], ["#4fb0ff", "#ffffff"], ["#7be06b", "#ff9cd2"], ["#b392f0", "#ffd166"]][bl.c % 4];
+    ctx.save(); ctx.beginPath(); ctx.ellipse(X, Y - 20, 50, 60, 0, 0, Math.PI * 2); ctx.clip();
+    for (let j = 0; j < 6; j++) { ctx.fillStyle = cs[j % 2]; ctx.fillRect(X - 50 + j * 17, Y - 80, 17, 130); }
+    ctx.restore();
+    ctx.strokeStyle = "#6b4a2b"; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(X - 26, Y + 30); ctx.lineTo(X - 12, Y + 58); ctx.moveTo(X + 26, Y + 30); ctx.lineTo(X + 12, Y + 58); ctx.stroke();
+    ctx.fillStyle = "#a8743c"; ctx.fillRect(X - 14, Y + 56, 28, 20);
+  }
+  for (const fl of d.birds) {
+    const gone = time - fl.hit < 4; const X0 = sx(fl.x + Math.sin(time * 0.5 + fl.ph) * 80 + (gone ? (time - fl.hit) * 300 : 0)), Y0 = sy(fl.alt + Math.sin(time * 1.3 + fl.ph) * 20 + (gone ? (time - fl.hit) * 200 : 0));
+    if (X0 < -100 || X0 > W + 100) continue;
+    ctx.strokeStyle = "#2b2b3a"; ctx.lineWidth = 4; ctx.lineCap = "round";
+    for (let j = 0; j < fl.n; j++) {
+      const X = X0 + (j - fl.n / 2) * 28, Y = Y0 + Math.abs(j - fl.n / 2) * 12, f = Math.sin(time * 12 + j) * 8;
+      ctx.beginPath(); ctx.moveTo(X - 14, Y - f); ctx.quadraticCurveTo(X - 6, Y - 6, X, Y); ctx.quadraticCurveTo(X + 6, Y - 6, X + 14, Y - f); ctx.stroke();
+    }
+  }
+}
+function drawClouds(d, front) {
+  for (const c of d.clouds) {
+    if ((c.s > 1.1) !== front) continue;
+    const X = sx(c.x), Y = sy(c.alt); if (X < -200 || X > W + 200) continue;
+    ctx.globalAlpha = front ? 0.8 : 0.95;
+    for (const [dx, dy, r] of [[0, 0, 40], [42, -14, 50], [90, 0, 38], [45, 14, 36], [-40, 6, 30]]) circle(X + (dx - 40) * c.s, Y + dy * c.s, r * c.s, "#ffffff");
+    ctx.globalAlpha = 1;
+  }
+}
+function drawScene() {
+  drawSky(); drawFar(); drawMid(); drawGround(); drawDecor();
+  const L = legOf(camX + W / 2), legs = [legData(L - 1), legData(L), legData(L + 1)];
+  for (const d of legs) drawWater2(d);
+  for (let k = legOf(camX) - 1; k <= legOf(camX + W) + 1; k++) drawAirport(k);
+  for (const d of legs) { drawClouds(d, false); drawItems(d); }
+  if (state !== "crash") drawPlane(sx(plane.x), sy(plane.alt), clamp(-Math.atan2(plane.vy, Math.max(plane.vx, 120)) * 0.9, -0.5, 0.5), plane.gear, skin(), mdl(), time, plane.shake);
+  for (const p of pieces) { ctx.save(); ctx.translate(sx(p.x), sy(p.alt)); ctx.rotate(p.rot); if (p.round) circle(0, 0, p.w, p.c); else { ctx.fillStyle = p.c; roundRect(-p.w / 2, -p.h / 2, p.w, p.h, Math.min(5, p.h / 2)); ctx.fill(); } ctx.restore(); }
+  for (const p of particles) { ctx.globalAlpha = clamp(p.life, 0, 1) * (p.fire ? 0.85 : 1); circle(sx(p.x), sy(p.alt), p.r, p.c); }
+  ctx.globalAlpha = 1;
+  if (state === "crash" && !crashWater && pieces.length) for (let j = 0; j < 3; j++) { const p = pieces[j * 2]; if (p) emoji("🔥", sx(p.x), sy(p.alt) - 18, 34 + Math.sin(time * 9 + j) * 4); }
+  for (const d of legs) drawClouds(d, true);
+  if (mist > 0) { ctx.fillStyle = `rgba(255,255,255,${mist})`; ctx.fillRect(-600, -600, W + 1200, H + 1200); }
+}
+
+// ---------- HUD ----------
+function drawButtons() {
+  for (const id of ["up", "down"]) {
+    const b = BTN[id], p = holding(id) || keys[id];
+    circle(b.x, b.y + 6, b.r, "rgba(0,0,0,0.25)"); circle(b.x, b.y + (p ? 4 : 0), b.r, p ? "#3d86e0" : "#5aa2ff");
+    const yy = b.y + (p ? 4 : 0), d = id === "up" ? -1 : 1;
+    poly("#fff", [[b.x, yy + d * 30], [b.x - 30, yy - d * 18], [b.x + 30, yy - d * 18]]);
+    text(id === "up" ? "UP" : "DOWN", b.x, yy - d * 34 + (id === "up" ? 4 : -4), 15, "#fff");
+  }
+  const g = BTN.gear, down = plane.gearT === 1;
+  circle(g.x, g.y + 6, g.r, "rgba(0,0,0,0.25)"); circle(g.x, g.y, g.r, down ? "#3fbf5f" : "#8c8f99");
+  circle(g.x, g.y - 8, 20, "#222"); circle(g.x, g.y - 8, 9, "#c3c8d0");
+  text(down ? "GEAR ⬇" : "GEAR ⬆", g.x, g.y + 30, 17, "#fff");
+  const o = BTN.go, p = holding("go") || keys.go;
+  circle(o.x, o.y + 6, o.r, "rgba(0,0,0,0.25)"); circle(o.x, o.y + (p ? 4 : 0), o.r, p ? "#e0841a" : "#ff9f1c");
+  emoji("🚀", o.x, o.y - 12 + (p ? 4 : 0), 46); text("GO FAST", o.x, o.y + 36 + (p ? 4 : 0), 18, "#fff");
+}
+const SHOPBTN = { x: W / 2 - 115, y: 650, w: 230, h: 84 };
+const canShop = () => state === "play" && plane.ground && plane.vx === 0;
+function drawHud() {
+  panel(16, 16, 256, 100);
+  text("⭐ " + totalStars, 30, 44, 30, "#3a2a10", "left");
+  text("🪙 " + coins, 258, 44, 30, "#3a2a10", "right");
+  text("⛽", 34, 86, 26, "#000");
+  panel(58, 74, 200, 24, "#d9dde3", 12);
+  panel(58, 74, Math.max(24, 200 * fuel / 100), 24, fuel > 50 ? "#56d356" : fuel > 25 ? "#ffd23f" : (Math.sin(time * 8) > 0 ? "#ff5a5a" : "#ff9a9a"), 12);
+  const c = CARGO[mission.cargo];
+  panel(16, 124, 256, 50);
+  emoji(c[0], 44, 149, 30); text("→ " + airportName(mission.dest), 66, 150, 22, "#1d3f6e", "left", null, 200);
+  // mini map
+  const ox = mission.origin * LEG, dx = mission.dest * LEG, f = clamp((plane.x - ox) / (dx - ox), 0, 1);
+  panel(290, 16, 444, 78, "rgba(20,40,70,0.7)", 20);
+  ctx.strokeStyle = "rgba(255,255,255,0.7)"; ctx.lineWidth = 4; ctx.setLineDash([10, 8]); ctx.beginPath(); ctx.moveTo(330, 70); ctx.lineTo(694, 70); ctx.stroke(); ctx.setLineDash([]);
+  emoji("🛫", 318, 70, 28); emoji("🛬", 708, 70, 28);
+  const left = Math.max(0, Math.round((dx - plane.x) / 4 / 10) * 10);
+  text(left > 0 ? `${airportName(mission.dest)}: ${left} m` : airportName(mission.dest), 512, 36, 22, "#fff", "center", null, 420);
+  emoji("✈️", 330 + f * 364, 66, 30);
+  // top right buttons
+  circle(BTN.speaker.x, BTN.speaker.y, BTN.speaker.r, "rgba(255,255,255,0.9)"); emoji("🔊", BTN.speaker.x, BTN.speaker.y + 2, 32);
+  circle(BTN.tilt.x, BTN.tilt.y, BTN.tilt.r, tiltOn ? "#56d356" : "rgba(255,255,255,0.9)"); emoji("📱", BTN.tilt.x, BTN.tilt.y - 6, 26); text(tiltOn ? "TILT ON" : "TILT", BTN.tilt.x, BTN.tilt.y + 20, 11, "#1d3f6e");
+  if (message && state !== "deliver") {
+    ctx.font = `bold 28px ${FONT}`; const w = Math.min(W - 60, ctx.measureText(message).width + 60);
+    panel(W / 2 - w / 2, 214, w, 54, "rgba(255,255,255,0.92)", 27); text(message, W / 2, 242, 28, "#2a2410", "center", null, W - 100);
+  }
+  drawButtons();
+  const dist = mission.dest * LEG - plane.x;
+  if (state === "play" && !plane.ground && dist < 2700 && dist > -RUNWAY) {
+    const m = mdl(), k = m.climb * m.gentle;
+    const ok = [plane.gear >= 0.98, plane.vx <= 280 * m.spd, plane.vy > STAR2 * k];
+    panel(262, 678, 500, 62, "rgba(20,40,70,0.75)", 24);
+    ["🛞 Gear down", "🐢 Slow", "🪶 Gentle"].forEach((s, i) => text((ok[i] ? "✅ " : "❌ ") + s, 345 + i * 168, 709, 21, "#fff", "center", null, 160));
+  } else if (canShop()) {
+    panel(SHOPBTN.x, SHOPBTN.y + 6, SHOPBTN.w, SHOPBTN.h, "rgba(0,0,0,0.25)", 30);
+    panel(SHOPBTN.x, SHOPBTN.y, SHOPBTN.w, SHOPBTN.h, "#7be06b", 30); text("🛒 SHOP", W / 2, SHOPBTN.y + 42, 34, "#1d4d12");
+  }
+  for (const fl of floaters) { ctx.globalAlpha = Math.min(1, fl.life); text(fl.text, sx(fl.x), sy(fl.alt), 36, fl.color, "center", "#1d2a3a"); }
+  ctx.globalAlpha = 1;
+  if (starPop) {
+    const t = starPop.t;
+    panel(W / 2 - 170, 290, 340, 110, "rgba(255,255,255,0.9)", 30);
+    for (let i = 0; i < 3; i++) { const s = clamp((t - i * 0.25) * 4, 0, 1); ctx.globalAlpha = i < starPop.n ? 1 : 0.25; emoji("⭐", W / 2 - 100 + i * 100, 345, 70 * (i < starPop.n ? s : 1)); }
+    ctx.globalAlpha = 1;
+  }
+  if (state === "deliver") {
+    panel(W / 2 - 280, 420, 560, 120, "rgba(255,255,255,0.94)", 34);
+    text("🎉 Delivered! 🎉", W / 2, 462, 46, "#e2572b");
+    text(`${c[0]} ${c[1]} → ${airportName(mission.dest)}`, W / 2, 510, 26, "#3a2a10");
+  }
+}
+
+// ---------- shop ----------
+let shopTab = "planes", shopFrom = "start", shopMsg = "";
+const SHOP_CLOSE = { x: W - 60, y: 52, r: 40 };
+const TABS = { planes: { x: 300, y: 92, w: 200, h: 56 }, skins: { x: 524, y: 92, w: 200, h: 56 } };
+function shopCards() {
+  const list = shopTab === "planes" ? MODELS : SKINS, cols = shopTab === "planes" ? 2 : 5;
+  const cw = shopTab === "planes" ? 470 : 184, ch = shopTab === "planes" ? 268 : 270, gap = shopTab === "planes" ? 20 : 12;
+  const x0 = (W - (cols * cw + (cols - 1) * gap)) / 2;
+  return list.map((it, i) => ({ it, x: x0 + (i % cols) * (cw + gap), y: 166 + Math.floor(i / cols) * (ch + 14), w: cw, h: ch }));
+}
+function openShop(from) { shopFrom = from; state = "shop"; shopMsg = ""; held.clear(); keys.up = keys.down = keys.go = false; say("Welcome to the plane shop! Tap a plane to buy it or fly it."); }
+function closeShop() {
+  if (shopFrom === "start") { state = "start"; showStart(); } else { state = "play"; say(`Ready to fly! ${missionText()}`); }
+}
+function shopTap(p) {
+  if (Math.hypot(p.x - SHOP_CLOSE.x, p.y - SHOP_CLOSE.y) < SHOP_CLOSE.r + 12) { closeShop(); return; }
+  for (const t in TABS) { const b = TABS[t]; if (p.x > b.x && p.x < b.x + b.w && p.y > b.y && p.y < b.y + b.h) { shopTab = t; sfx.coin(); return; } }
+  for (const c of shopCards()) {
+    if (p.x < c.x || p.x > c.x + c.w || p.y < c.y || p.y > c.y + c.h) continue;
+    const isPlane = shopTab === "planes", ownList = isPlane ? ownedModels : owned, it = c.it;
+    if (ownList.includes(it.id)) {
+      if (isPlane) model = it.id; else equipped = it.id;
+      save(); sfx.coin(); say(`Ready to fly the ${isPlane ? it.name : it.name + " plane"}!`);
+    } else if (coins >= it.price) {
+      coins -= it.price; ownList.push(it.id); if (isPlane) model = it.id; else equipped = it.id;
+      save(); sfx.yay(); burst(camX + c.x + c.w / 2, camAlt + BASE - c.y - 80, 30);
+      say(`New plane! You got the ${it.name}!`);
+    } else {
+      sfx.nope(); shopMsg = `You need ${it.price - coins} more coins`;
+      say("Not enough coins yet, keep flying!");
+    }
+    return;
+  }
+}
+function drawShop() {
+  ctx.fillStyle = "rgba(15,30,60,0.75)"; ctx.fillRect(-600, -600, W + 1200, H + 1200);
+  panel(16, 12, W - 32, H - 24, "#eaf6ff", 30);
+  text("🛒 Plane Shop", 40, 52, 40, "#1d3f6e", "left");
+  panel(W - 290, 26, 170, 52, "#fff3c4", 24); text("🪙 " + coins, W - 205, 53, 32, "#7a5200");
+  circle(SHOP_CLOSE.x, SHOP_CLOSE.y, SHOP_CLOSE.r, "#ff6b6b"); text("✕", SHOP_CLOSE.x, SHOP_CLOSE.y + 2, 40, "#fff");
+  for (const t in TABS) { const b = TABS[t], on = shopTab === t; panel(b.x, b.y, b.w, b.h, on ? "#4fb0ff" : "#ffffff", 22); text(t === "planes" ? "✈️ Planes" : "🎨 Skins", b.x + b.w / 2, b.y + b.h / 2 + 1, 26, on ? "#fff" : "#1d3f6e"); }
+  const sk = skin(), m = mdl();
+  for (const c of shopCards()) {
+    const isPlane = shopTab === "planes", it = c.it, own = (isPlane ? ownedModels : owned).includes(it.id), on = isPlane ? model === it.id : equipped === it.id;
+    panel(c.x, c.y, c.w, c.h, on ? "#fff7d1" : "#ffffff", 22);
+    if (on) { ctx.strokeStyle = "#ffcc00"; ctx.lineWidth = 6; roundRect(c.x, c.y, c.w, c.h, 22); ctx.stroke(); }
+    const pm = isPlane ? it : m, ps = isPlane ? sk : it;
+    const wid = (pm.L * 2 + 50) * pm.sc, fit = Math.min(isPlane ? 0.92 : 1.25, (c.w - 20) / wid);
+    ctx.save(); ctx.translate(c.x + c.w / 2, c.y + (isPlane ? 150 : 128)); ctx.scale(fit, fit);
+    drawPlane(-pm.L * pm.sc * 0.05, 0, 0, 1, ps, pm, time);
+    ctx.restore();
+    if (isPlane) {
+      text(it.name, c.x + 24, c.y + 30, 28, "#1d3f6e", "left");
+      text(it.about, c.x + 24, c.y + 172, 20, "#45607e", "left", null, c.w - 48);
+      text(`🪙 x${it.coin} per landing`, c.x + c.w - 24, c.y + 30, 20, "#7a5200", "right");
+    } else text(it.name, c.x + c.w / 2, c.y + 30, 22, "#1d3f6e", "center", null, c.w - 16);
+    const by = c.y + c.h - 60, bw = c.w - 32;
+    if (on) { panel(c.x + 16, by, bw, 46, "#ffcc00", 20); text("✔ EQUIPPED", c.x + c.w / 2, by + 24, 22, "#5a3a00"); }
+    else if (own) { panel(c.x + 16, by, bw, 46, "#4fb0ff", 20); text("EQUIP", c.x + c.w / 2, by + 24, 24, "#fff"); }
+    else { const can = coins >= it.price; panel(c.x + 16, by, bw, 46, can ? "#56d356" : "#c5cad3", 20); text((it.price ? "BUY 🪙 " + it.price : "FREE"), c.x + c.w / 2, by + 24, 22, can ? "#fff" : "#5d6470"); }
+  }
+  if (shopMsg) { panel(740, 96, 248, 48, "#ffe0e0", 22); text(shopMsg + " 🪙", 864, 121, 19, "#b02020", "center", null, 236); }
+  for (const p of particles) { ctx.globalAlpha = clamp(p.life, 0, 1); circle(sx(p.x), sy(p.alt), p.r, p.c); }
+  ctx.globalAlpha = 1;
+}
+
+// ---------- loop ----------
+function draw() {
+  ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.fillStyle = "#4fb0ff"; ctx.fillRect(0, 0, cv.width, cv.height); ctx.restore();
+  drawScene();
+  if (state === "play" || state === "crash" || state === "deliver") drawHud();
+  if (state === "shop") drawShop();
+}
+let lastT = performance.now();
+function loop(now) {
+  const dt = Math.min(0.05, (now - lastT) / 1000); lastT = now;
+  if (state === "play" || state === "crash" || state === "deliver") update(dt);
+  else {
+    time += dt;
+    for (const p of particles) { p.va -= p.g * dt; p.x += p.vx * dt; p.alt += p.va * dt; p.life -= dt; }
+    particles = particles.filter(p => p.life > 0);
+  }
+  draw();
+  requestAnimationFrame(loop);
+}
+cv.addEventListener("pointerdown", e => {
+  if (state === "shop") { e.preventDefault(); shopTap(toWorld(e)); return; }
+  if (canShop()) { const p = toWorld(e); if (p.x > SHOPBTN.x && p.x < SHOPBTN.x + SHOPBTN.w && p.y > SHOPBTN.y && p.y < SHOPBTN.y + SHOPBTN.h) openShop("airport"); }
+});
+const startEl = document.getElementById("start");
+function showStart() { startEl.style.display = "flex"; document.getElementById("startCoins").textContent = "🪙 " + coins + " coins   ⭐ " + totalStars; }
+let audioReady = false;
+function unlock() {
+  if (audioReady) return; audioReady = true; initAudio();
+  try { speechSynthesis.speak(new SpeechSynthesisUtterance(" ")); } catch (e) {}
+}
+let started = false;
+document.getElementById("play").addEventListener("click", () => {
+  unlock(); startEl.style.display = "none";
+  if (!started) { started = true; parkAt(0); }
+  state = "play"; sfx.ring();
+  say(`Welcome, pilot! ${missionText()} Hold GO to speed up, then press UP to take off!`);
+});
+document.getElementById("shop").addEventListener("click", () => { unlock(); startEl.style.display = "none"; openShop("start"); });
+document.addEventListener("visibilitychange", () => { if (document.hidden) save(); if (!ac) return; if (document.hidden) ac.suspend(); else ac.resume(); });
+showStart();
+requestAnimationFrame(loop);
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
+</script>
+</body>
+</html>
