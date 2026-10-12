@@ -38,7 +38,13 @@
 <script>
 "use strict";
 // ================= Tuning =================
-const LEG = 7000;          // distance between airports
+const FAST = /[?&]fast=1/.test(location.search);   // ?fast=1 makes short legs for testing
+const LEG_SECONDS = FAST ? 25 : 180; // how long an airport-to-airport trip takes at normal cruise speed
+const CRUISE = 300, BOOST = 360;     // flying speeds (GO FAST = BOOST)
+const LEG = Math.round((LEG_SECONDS - 6) * CRUISE + 1800); // distance between airports (takeoff/landing are slower)
+const SEG = LEG / 3;                 // scenery changes 3 times per trip
+const FUEL_RATE = 100 / (LEG_SECONDS * 1.6); // a full tank lasts ~1.6 trips at cruise
+const CHEER_SEC = 45;                // seconds between encouraging voice lines
 const RUNWAY = 1100;       // runway length
 const TAKEOFF_V = 210;     // speed needed to take off
 const MAXALT = 1500;       // highest the plane can fly
@@ -111,10 +117,10 @@ const sfx = {
   whoosh: () => noise(0.6, 0.2, "bandpass", 400, 0, 1400),
   star: (i) => tone(660 + i * 220, 0.25, "triangle", 0.22, 0, i * 0.25),
 };
-let lastSay = "", message = "";
+let lastSay = "", message = "", lastSayTime = 0;
 function setMsg(t) { message = t; }
 function say(text) {
-  lastSay = text; message = text;
+  lastSay = text; message = text; lastSayTime = time;
   try {
     speechSynthesis.cancel();
     const u = new SpeechSynthesisUtterance(text.replace(/[^\w\s!?,.']/g, ""));
@@ -128,18 +134,19 @@ function say(text) {
 // ---------- world ----------
 const legOf = x => Math.floor(x / LEG);
 const biomeOfLeg = L => BIOMES[((L % 4) + 4) % 4];
-const biomeAt = x => biomeOfLeg(legOf(x));
+const segOf = x => Math.floor(x / SEG);
+const biomeAt = x => biomeOfLeg(segOf(x));
 const airportName = k => NAMES[((k % NAMES.length) + NAMES.length) % NAMES.length];
 function groundH(x) {
-  const L = legOf(x), u = x - L * LEG, b = biomeOfLeg(L);
+  const L = legOf(x), u = x - L * LEG, b = biomeAt(x), s = x - segOf(x) * SEG;
   if (u < 1500 || u > LEG - 1800) return 0;
-  const e = Math.min(1, (u - 1500) / 600, (LEG - 1800 - u) / 600);
+  const e = clamp(Math.min(1, (u - 1500) / 600, (LEG - 1800 - u) / 600, s / 700, (SEG - s) / 700), 0, 1);
   if (b === "mountains") return e * Math.max(0, 170 + 140 * Math.sin(u / 420) + 80 * Math.sin(u / 170 + 1));
   if (b === "desert") return e * (30 + 22 * Math.sin(u / 260));
   if (b === "city") return e * (8 + 8 * Math.sin(u / 300));
   return 0;
 }
-function isWater(x) { const L = legOf(x), u = x - L * LEG; return biomeOfLeg(L) === "ocean" && u > 1700 && u < LEG - 2000; }
+function isWater(x) { const L = legOf(x), u = x - L * LEG, s = x - segOf(x) * SEG; return biomeAt(x) === "ocean" && u > 1700 && u < LEG - 2000 && s > 400 && s < SEG - 400; }
 function runwayAt(x) { const k = legOf(x), u = x - k * LEG; return u >= 0 && u <= RUNWAY ? k : null; }
 
 const legCache = new Map();
@@ -148,19 +155,18 @@ function legData(L) {
   let seed = L * 9301 + 49297; const r = () => (seed = (seed * 9301 + 49297) % 233280) / 233280;
   const base = L * LEG, d = { rings: [], coins: [], balloons: [], fuel: [], clouds: [], birds: [], boats: [], whales: [] };
   const top = (x, w = 300) => { let m = 0; for (let k = -w; k <= w; k += 50) m = Math.max(m, groundH(x + k)); return m; };
-  for (let u = 2300; u < LEG - 2600; u += 850 + r() * 300) { const x = base + u; d.rings.push({ x, alt: top(x) + 170 + r() * 300, got: false }); }
-  for (let a = 0; a < 3; a++) {
-    const x0 = base + 2000 + a * 1500 + r() * 400, h0 = top(x0, 500) + 150 + r() * 250;
+  for (let u = 2300; u < LEG - 2600; u += 900 + r() * 400) { const x = base + u; d.rings.push({ x, alt: top(x) + 170 + r() * 300, got: false }); }
+  for (let u = 2600; u < LEG - 3000; u += 2400 + r() * 1200) {
+    const x0 = base + u, h0 = top(x0, 500) + 150 + r() * 250;
     for (let i = 0; i < 5; i++) d.coins.push({ x: x0 + i * 60, alt: h0 + Math.sin(i / 4 * Math.PI) * 70, got: false });
   }
-  for (let i = 0; i < 2; i++) { const x = base + 2700 + i * 2200 + r() * 500; d.balloons.push({ x, alt: top(x) + 300 + r() * 350, ph: r() * 6, c: i + L }); }
-  { const x = base + LEG / 2 + 300; d.fuel.push({ x, alt: top(x) + 200 + r() * 150, got: false }); }
-  for (let u = 900; u < LEG; u += 500 + r() * 300) d.clouds.push({ x: base + u, alt: 260 + r() * 800, s: 0.8 + r() * 0.7 });
-  for (let i = 0; i < 2; i++) { const x = base + 3200 + i * 1900 + r() * 400; d.birds.push({ x, alt: top(x) + 200 + r() * 300, n: 3 + Math.floor(r() * 3), ph: r() * 6, hit: -99 }); }
-  if (biomeOfLeg(L) === "ocean") {
-    for (let u = 2000; u < LEG - 2300; u += 600 + r() * 400) d.boats.push({ x: base + u, c: Math.floor(r() * 3) });
-    for (let i = 0; i < 3; i++) d.whales.push({ x: base + 2500 + i * 900 + r() * 300, ph: r() * 6 });
-  }
+  for (let u = 3000; u < LEG - 3000; u += 4200 + r() * 1800) { const x = base + u; d.balloons.push({ x, alt: top(x) + 300 + r() * 350, ph: r() * 6, c: Math.floor(r() * 4) }); }
+  for (const f of LEG > 20000 ? [0.33, 0.68] : [0.5]) { const x = base + LEG * f + 300; d.fuel.push({ x, alt: top(x) + 200 + r() * 150, got: false }); }
+  for (let u = 900; u < LEG; u += 450 + r() * 350) d.clouds.push({ x: base + u, alt: 260 + r() * 800, s: 0.8 + r() * 0.7 });
+  for (let u = 3800; u < LEG - 3000; u += 3800 + r() * 1600) { const x = base + u; d.birds.push({ x, alt: top(x) + 200 + r() * 300, n: 3 + Math.floor(r() * 3), ph: r() * 6, hit: -99 }); }
+  for (let u = 1800; u < LEG - 2000; u += 650 + r() * 450) if (isWater(base + u)) d.boats.push({ x: base + u, c: Math.floor(r() * 3) });
+  for (let u = 2100; u < LEG - 2000; u += 1700 + r() * 900) if (isWater(base + u) && isWater(base + u - 150) && isWater(base + u + 150)) d.whales.push({ x: base + u, ph: r() * 6 });
+  { const x = base + Math.round(LEG * 0.5) - 900; d.rainbow = { x, base: top(x, 450), r: 420, got: false }; }
   legCache.set(L, d);
   return d;
 }
@@ -217,6 +223,7 @@ let camX = plane.x - 300, camAlt = 0;
 let particles = [], pieces = [], floaters = [], starPop = null;
 let crashWater = false, crashT = 0, deliverT = 0, mist = 0, inCloud = false;
 const said = new Set();
+const CHEERS = ["Great flying!", "You are doing awesome, pilot!", "Look for gold rings and coins!", "Wow, what a view!", "Your cargo is safe and happy!", "Keep it up, captain!"];
 function sayOnce(key, text) { if (said.has(key)) return; said.add(key); say(text); }
 const keys = { up: false, down: false, go: false };
 const held = new Map();
@@ -408,8 +415,8 @@ function updatePlane(dt) {
     return;
   }
   // flying
-  let tv = (go ? 480 : 300) * m.spd;
-  if (plane.gear > 0.5) tv = Math.min(tv, (go ? 320 : 220) * m.spd);
+  let tv = (go ? BOOST : CRUISE) * m.spd;
+  if (plane.gear > 0.5) tv = Math.min(tv, (go ? 300 : 220) * m.spd);
   if (fuel <= 0) tv = 220 * m.spd;
   plane.vx += clamp(tv - plane.vx, -150 * m.acc * dt, 150 * m.acc * dt);
   let vyT = (ctrl > 0 ? 240 * ctrl : ctrl < 0 ? 300 * ctrl : 0) * m.climb;
@@ -418,14 +425,20 @@ function updatePlane(dt) {
   plane.x += plane.vx * dt; plane.alt += plane.vy * dt;
   if (plane.alt > MAXALT) { plane.alt = MAXALT; plane.vy = Math.min(plane.vy, 0); setMsg("That's as high as we go! ☁️"); }
   // fuel
-  fuel = Math.max(0, fuel - (go ? 2.6 : 1.3) * dt);
-  if (fuel < 25 && !fuelWarned) { fuelWarned = true; say("Fuel is low! Fly to the airport, or grab a fuel can!"); }
+  fuel = Math.max(0, fuel - FUEL_RATE * (go ? 1.4 : 1) * dt);
+  if (fuel < 15 && !fuelWarned) { fuelWarned = true; say("Fuel is low! Fly to the airport, or grab a fuel can!"); }
   if (fuel <= 0 && !fuelEmpty) { fuelEmpty = true; say("Out of fuel! Glide down gently and land on the runway."); }
   // scenery voice lines
-  const L = legOf(plane.x), u = plane.x - L * LEG, b = biomeOfLeg(L);
-  if (u > 1300 && u < 3000) sayOnce("biome" + L, { city: "Look at the big city!", ocean: "Look, the ocean! Can you see the whales?", mountains: "Mountains ahead! Fly up high!", desert: "Welcome to the desert! The sun is setting." }[b]);
+  const L = legOf(plane.x), u = plane.x - L * LEG, S = segOf(plane.x), sOff = plane.x - S * SEG, b = biomeAt(plane.x);
+  if (u > 1300 && sOff > 1000 && sOff < 3000 && u < LEG - 3000) sayOnce("biome" + S, { city: "Look at the big city!", ocean: "Look, the ocean! Can you see the whales?", mountains: "Mountains ahead! Fly up high!", desert: "Welcome to the desert! The sun is setting." }[b]);
   // approach help
   const dist = destX - plane.x;
+  const prog = clamp((plane.x - mission.origin * LEG) / Math.max(1, destX - mission.origin * LEG), 0, 1), tag = mission.dest + "_" + crashCount;
+  if (prog > 0.84 && dist > 2700) sayOnce("almost" + tag, "Almost there! Get ready to land soon.");
+  else if (prog > 0.5 && prog < 0.84 && !said.has("half" + tag)) sayOnce("half" + tag, "Halfway there! Keep going, pilot!");
+  else if (prog > 0.06 && prog < 0.8 && time - lastSayTime > CHEER_SEC) say(CHEERS[Math.floor(Math.random() * CHEERS.length)]);
+  const rb = legData(L).rainbow;
+  if (rb && !rb.got && rb.x - plane.x < 1600 && rb.x > plane.x) sayOnce("rbw" + L + "_" + crashCount, "A rainbow! Fly under the rainbow for bonus coins!");
   if (dist < 2700 && dist > 0) sayOnce("near" + mission.dest + "_" + mission.origin + crashCount, `${airportName(mission.dest)} is ahead! Fly down low and follow the dots.`);
   if (dist < 1700 && dist > -RUNWAY && plane.gearT === 0) sayOnce("gear" + mission.dest + crashCount, "Gear down for landing! Press GEAR.");
   const above = plane.alt - groundH(plane.x);
@@ -435,9 +448,13 @@ function updatePlane(dt) {
   }
   // pickups
   const d = legData(L), cy = plane.alt + m.cy, nose = plane.x + m.L * m.sc * 0.3, hw = m.L * m.sc * 0.7;
+  if (d.rainbow && !d.rainbow.got && Math.abs(plane.x - d.rainbow.x) < 40 && cy > d.rainbow.base && cy < d.rainbow.base + d.rainbow.r - 25) {
+    d.rainbow.got = true; coins += 25; saveDirty = true; sfx.yay(); burst(plane.x, cy, 40);
+    floater("+25 🪙", plane.x, cy + 70, "#ffd23f"); say("You flew through the rainbow! 25 bonus coins!");
+  }
   for (const r of d.rings) if (!r.got && Math.abs(nose - r.x) < 26 && Math.abs(cy - r.alt) < 46) { r.got = true; coins += 3; saveDirty = true; sfx.ring(); floater("+3 🪙", r.x, r.alt + 60, "#ffd23f"); burst(r.x, r.alt, 10); }
   for (const c of d.coins) if (!c.got && Math.abs(plane.x - c.x) < hw && Math.abs(cy - c.alt) < 20 + m.R * m.sc) { c.got = true; coins += 1; saveDirty = true; sfx.coin(); }
-  for (const f of d.fuel) if (!f.got && Math.abs(plane.x - f.x) < hw + 20 && Math.abs(cy - f.alt) < 30 + m.R * m.sc) { f.got = true; fuel = Math.min(100, fuel + 40); fuelWarned = fuel < 25; fuelEmpty = false; sfx.fuel(); floater("+FUEL", f.x, f.alt + 60, "#7be06b"); say("Fuel! Yay!"); }
+  for (const f of d.fuel) if (!f.got && Math.abs(plane.x - f.x) < hw + 20 && Math.abs(cy - f.alt) < 30 + m.R * m.sc) { f.got = true; fuel = Math.min(100, fuel + 40); fuelWarned = fuel < 15; fuelEmpty = false; sfx.fuel(); floater("+FUEL", f.x, f.alt + 60, "#7be06b"); say("Fuel! Yay!"); }
   for (const bl of d.balloons) {
     const by = bl.alt + Math.sin(time * 0.6 + bl.ph) * 40;
     if (Math.abs(plane.x - bl.x) < hw + 40 && Math.abs(cy - by) < 70 + m.R * m.sc && plane.shake <= 0) {
@@ -576,8 +593,8 @@ const FAR = { city: "#a9d98f", ocean: "#62b9ef", mountains: "#9db8a0", desert: "
 const MID = { city: "#8fd16f", ocean: "#4aa6e6", mountains: "#7fb27a", desert: "#e9b46e" };
 const LAND = { city: "#7ccc5a", ocean: "#e9d79a", mountains: "#6aa35a", desert: "#f0c27a" };
 function drawSky() {
-  const x = camX + W / 2, L = legOf(x), u = x - L * LEG, A = biomeOfLeg(L), B = biomeOfLeg(L + 1);
-  const t = clamp((u - (LEG - 2200)) / 2200, 0, 1);
+  const x = camX + W / 2, S = segOf(x), u = x - S * SEG, A = biomeOfLeg(S), B = biomeOfLeg(S + 1);
+  const t = clamp((u - (SEG - 2200)) / 2200, 0, 1);
   const g = ctx.createLinearGradient(0, 0, 0, H);
   g.addColorStop(0, mix(SKY[A][0], SKY[B][0], t)); g.addColorStop(1, mix(SKY[A][1], SKY[B][1], t));
   ctx.fillStyle = g; ctx.fillRect(-600, -600, W + 1200, H + 1200);
@@ -717,7 +734,15 @@ function drawWater2(d) {
     if (up > 0.5) for (let j = 0; j < 5; j++) circle(X + 30 + (j - 2) * 8 * up, top - 20 - up * 40 - Math.abs(j - 2) * -6, 5, "rgba(255,255,255,0.85)");
   }
 }
+const RAINBOW = ["#ff5e5e", "#ff9f1c", "#ffd23f", "#5ad16b", "#4fb0ff", "#5b6cff", "#a35bff"];
 function drawItems(d) {
+  const rb = d.rainbow;
+  if (rb && sx(rb.x) < W + rb.r + 100 && sx(rb.x) > -rb.r - 100) {
+    ctx.globalAlpha = rb.got ? 0.45 : 0.85; ctx.lineWidth = 15;
+    RAINBOW.forEach((c, i) => { ctx.strokeStyle = c; ctx.beginPath(); ctx.arc(sx(rb.x), sy(rb.base), rb.r - i * 15, Math.PI, 0); ctx.stroke(); });
+    ctx.globalAlpha = 1;
+    if (!rb.got) { const k = Math.sin(time * 5); emoji("✨", sx(rb.x) - 60, sy(rb.base + 160) + k * 6, 30); emoji("✨", sx(rb.x) + 60, sy(rb.base + 220) - k * 6, 26); }
+  }
   for (const c of d.clouds) { const X = sx(c.x), Y = sy(c.alt); if (X < -200 || X > W + 200) continue; c._x = X; c._y = Y; }
   for (const r of d.rings) {
     if (r.got) continue; const X = sx(r.x), Y = sy(r.alt); if (X < -80 || X > W + 80) continue;
@@ -806,8 +831,9 @@ function drawHud() {
   panel(290, 16, 444, 78, "rgba(20,40,70,0.7)", 20);
   ctx.strokeStyle = "rgba(255,255,255,0.7)"; ctx.lineWidth = 4; ctx.setLineDash([10, 8]); ctx.beginPath(); ctx.moveTo(330, 70); ctx.lineTo(694, 70); ctx.stroke(); ctx.setLineDash([]);
   emoji("🛫", 318, 70, 28); emoji("🛬", 708, 70, 28);
-  const left = Math.max(0, Math.round((dx - plane.x) / 4 / 10) * 10);
-  text(left > 0 ? `${airportName(mission.dest)}: ${left} m` : airportName(mission.dest), 512, 36, 22, "#fff", "center", null, 420);
+  const sp = plane.ground ? CRUISE * mdl().spd : Math.max(150, plane.vx), secs = Math.max(0, Math.ceil((dx - plane.x) / sp));
+  const tl = secs >= 60 ? Math.floor(secs / 60) + ":" + String(secs % 60).padStart(2, "0") : secs + " sec";
+  text(secs > 0 ? `${airportName(mission.dest)}  ⏱ ${tl} to go` : airportName(mission.dest), 512, 36, 22, "#fff", "center", null, 420);
   emoji("✈️", 330 + f * 364, 66, 30);
   // top right buttons
   circle(BTN.speaker.x, BTN.speaker.y, BTN.speaker.r, "rgba(255,255,255,0.9)"); emoji("🔊", BTN.speaker.x, BTN.speaker.y + 2, 32);
