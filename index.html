@@ -43,7 +43,8 @@ const LEG_SECONDS = FAST ? 25 : 180; // how long an airport-to-airport trip take
 const CRUISE = 300, BOOST = 360;     // flying speeds (GO FAST = BOOST)
 const LEG = Math.round((LEG_SECONDS - 6) * CRUISE + 1800); // distance between airports (takeoff/landing are slower)
 const SEG = LEG / 3;                 // scenery changes 3 times per trip
-const FUEL_RATE = 100 / (LEG_SECONDS * 1.6); // a full tank lasts ~1.6 trips at cruise
+const FUEL_RATE = 100 / LEG_SECONDS;  // % per second for a tank that lasts exactly 1 trip; each plane divides by its tank size
+const CAN_FUEL = 64;                  // a fuel can holds this much (in "Classic tank = 160" units)
 const CHEER_SEC = 45;                // seconds between encouraging voice lines
 const RUNWAY = 1100;       // runway length
 const TAKEOFF_V = 210;     // speed needed to take off
@@ -189,13 +190,13 @@ const SKINS = [
 // plane models: sizes, handling, and how many coins they earn per landing
 const MODELS = [
   { id: "zipper", name: "Tiny Zipper", price: 80, sc: 0.85, L: 48, R: 14, win: 1, wing: 26, gear: [-6, 16], strut: 16, wr: 7, prop: true, eng: 0,
-    spd: 1.15, acc: 1.3, climb: 1.2, turn: 1.5, tv: 190, coin: 1, gentle: 1.1, brake: 1.2, about: "Small and zippy!" },
+    tank: 1.2, tankName: "Small", spd: 1.15, acc: 1.3, climb: 1.2, turn: 1.5, tv: 190, coin: 1, gentle: 1.1, brake: 1.2, about: "Small and zippy!" },
   { id: "classic", name: "Classic", price: 0, sc: 1, L: 66, R: 19, win: 4, wing: 36, gear: [-12, 26], strut: 22, wr: 8, prop: true, eng: 0,
-    spd: 1, acc: 1, climb: 1, turn: 1, tv: 210, coin: 1, gentle: 1, brake: 1, about: "Easy to fly." },
+    tank: 1.6, tankName: "Medium", spd: 1, acc: 1, climb: 1, turn: 1, tv: 210, coin: 1, gentle: 1, brake: 1, about: "Easy to fly." },
   { id: "airliner", name: "Long Airliner", price: 300, sc: 1, L: 112, R: 19, win: 12, wing: 46, gear: [-34, 56], strut: 22, wr: 8, prop: false, eng: 1,
-    spd: 0.95, acc: 0.85, climb: 0.85, turn: 0.75, tv: 225, coin: 1.5, gentle: 0.95, brake: 0.85, about: "Carries more cargo!" },
+    tank: 2.0, tankName: "Big", spd: 0.95, acc: 0.85, climb: 0.85, turn: 0.75, tv: 225, coin: 1.5, gentle: 0.95, brake: 0.85, about: "Carries more cargo!" },
   { id: "jumbo", name: "Big Jumbo Jet", price: 700, sc: 1.15, L: 120, R: 25, win: 14, deck: true, wing: 58, gear: [-46, -20, 60], strut: 24, wr: 10, prop: false, eng: 2,
-    spd: 0.9, acc: 0.7, climb: 0.72, turn: 0.6, tv: 240, coin: 2, gentle: 0.85, brake: 0.65, about: "Huge! Land extra gently." },
+    tank: 2.6, tankName: "Huge", spd: 0.9, acc: 0.7, climb: 0.72, turn: 0.6, tv: 240, coin: 2, gentle: 0.85, brake: 0.65, about: "Huge! Land extra gently." },
 ];
 for (const m of MODELS) m.cy = (m.R * 0.5 + m.strut + m.wr) * m.sc;   // height of the body center above the wheels
 const LANDING_COINS = [0, 10, 20, 30];
@@ -425,7 +426,7 @@ function updatePlane(dt) {
   plane.x += plane.vx * dt; plane.alt += plane.vy * dt;
   if (plane.alt > MAXALT) { plane.alt = MAXALT; plane.vy = Math.min(plane.vy, 0); setMsg("That's as high as we go! ☁️"); }
   // fuel
-  fuel = Math.max(0, fuel - FUEL_RATE * (go ? 1.4 : 1) * dt);
+  fuel = Math.max(0, fuel - FUEL_RATE / m.tank * (go ? 1.4 : 1) * dt);
   if (fuel < 15 && !fuelWarned) { fuelWarned = true; say("Fuel is low! Fly to the airport, or grab a fuel can!"); }
   if (fuel <= 0 && !fuelEmpty) { fuelEmpty = true; say("Out of fuel! Glide down gently and land on the runway."); }
   // scenery voice lines
@@ -454,7 +455,7 @@ function updatePlane(dt) {
   }
   for (const r of d.rings) if (!r.got && Math.abs(nose - r.x) < 26 && Math.abs(cy - r.alt) < 46) { r.got = true; coins += 3; saveDirty = true; sfx.ring(); floater("+3 🪙", r.x, r.alt + 60, "#ffd23f"); burst(r.x, r.alt, 10); }
   for (const c of d.coins) if (!c.got && Math.abs(plane.x - c.x) < hw && Math.abs(cy - c.alt) < 20 + m.R * m.sc) { c.got = true; coins += 1; saveDirty = true; sfx.coin(); }
-  for (const f of d.fuel) if (!f.got && Math.abs(plane.x - f.x) < hw + 20 && Math.abs(cy - f.alt) < 30 + m.R * m.sc) { f.got = true; fuel = Math.min(100, fuel + 40); fuelWarned = fuel < 15; fuelEmpty = false; sfx.fuel(); floater("+FUEL", f.x, f.alt + 60, "#7be06b"); say("Fuel! Yay!"); }
+  for (const f of d.fuel) if (!f.got && Math.abs(plane.x - f.x) < hw + 20 && Math.abs(cy - f.alt) < 30 + m.R * m.sc) { f.got = true; fuel = Math.min(100, fuel + CAN_FUEL / m.tank); fuelWarned = fuel < 15; fuelEmpty = false; sfx.fuel(); floater("+FUEL", f.x, f.alt + 60, "#7be06b"); say("Fuel! Yay!"); }
   for (const bl of d.balloons) {
     const by = bl.alt + Math.sin(time * 0.6 + bl.ph) * 40;
     if (Math.abs(plane.x - bl.x) < hw + 40 && Math.abs(cy - by) < 70 + m.R * m.sc && plane.shake <= 0) {
@@ -821,8 +822,10 @@ function drawHud() {
   text("⭐ " + totalStars, 30, 44, 30, "#3a2a10", "left");
   text("🪙 " + coins, 258, 44, 30, "#3a2a10", "right");
   text("⛽", 34, 86, 26, "#000");
-  panel(58, 74, 200, 24, "#d9dde3", 12);
-  panel(58, 74, Math.max(24, 200 * fuel / 100), 24, fuel > 50 ? "#56d356" : fuel > 25 ? "#ffd23f" : (Math.sin(time * 8) > 0 ? "#ff5a5a" : "#ff9a9a"), 12);
+  const tk = mdl(), bw = 80 + 70 * (tk.tank - 1.2) / 1.4;   // bigger tank = longer fuel bar
+  text(tk.tankName, 258, 86, 15, "#5d6470", "right", null, 50);
+  panel(58, 74, bw, 24, "#d9dde3", 12);
+  panel(58, 74, Math.max(24, bw * fuel / 100), 24, fuel > 50 ? "#56d356" : fuel > 25 ? "#ffd23f" : (Math.sin(time * 8) > 0 ? "#ff5a5a" : "#ff9a9a"), 12);
   const c = CARGO[mission.cargo];
   panel(16, 124, 256, 50);
   emoji(c[0], 44, 149, 30); text("→ " + airportName(mission.dest), 66, 150, 22, "#1d3f6e", "left", null, 200);
@@ -921,7 +924,10 @@ function drawShop() {
     ctx.restore();
     if (isPlane) {
       text(it.name, c.x + 24, c.y + 30, 28, "#1d3f6e", "left");
-      text(it.about, c.x + 24, c.y + 172, 20, "#45607e", "left", null, c.w - 48);
+      text(it.about, c.x + 24, c.y + 172, 20, "#45607e", "left", null, c.w - 240);
+      const pips = [1.2, 1.6, 2.0, 2.6].filter(v => v <= it.tank).length;
+      text("⛽ " + it.tankName + " tank", c.x + c.w - 112, c.y + 172, 18, "#2f7a45", "right");
+      for (let j = 0; j < 4; j++) panel(c.x + c.w - 104 + j * 21, c.y + 162, 17, 20, j < pips ? "#56d356" : "#d9dde3", 5);
       text(`🪙 x${it.coin} per landing`, c.x + c.w - 24, c.y + 30, 20, "#7a5200", "right");
     } else text(it.name, c.x + c.w / 2, c.y + 30, 22, "#1d3f6e", "center", null, c.w - 16);
     const by = c.y + c.h - 60, bw = c.w - 32;
